@@ -1,6 +1,7 @@
 """Regression coverage for verifier-owned DFlash2 output heads."""
 
 import pyarrow  # noqa: F401  # Load Arrow before Torch native libraries.
+import pytest
 import torch
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Config
 
@@ -9,7 +10,8 @@ from speculators.models.dflash2 import DFlash2DraftModel, DFlash2SpeculatorConfi
 from speculators.proposals import GreedyTokenProposalConfig
 
 
-def test_dflash2_full_vocab_head_copies_and_freezes_verifier_weights(monkeypatch):
+@pytest.mark.parametrize("tied_head", [False, True], ids=["independent-head", "tied-fallback"])
+def test_dflash2_full_vocab_head_copies_and_freezes_verifier_weights(monkeypatch, tied_head):
     """The full-vocabulary draft head must use independent verifier weight storage."""
     transformer_config = Qwen3Config(
         hidden_size=16,
@@ -19,6 +21,7 @@ def test_dflash2_full_vocab_head_copies_and_freezes_verifier_weights(monkeypatch
         num_key_value_heads=1,
         head_dim=8,
         vocab_size=64,
+        tie_word_embeddings=tied_head,
         _attn_implementation="eager",
     )
     config = DFlash2SpeculatorConfig(
@@ -43,9 +46,13 @@ def test_dflash2_full_vocab_head_copies_and_freezes_verifier_weights(monkeypatch
     verifier_head = torch.arange(64 * 16, dtype=torch.float32).reshape(64, 16)
     verifier_weights = {
         "embed_tokens.weight": torch.full((64, 16), -1.0),
-        "lm_head.weight": verifier_head,
         "model.norm.weight": torch.ones(16),
     }
+    if not tied_head:
+        verifier_weights["lm_head.weight"] = verifier_head
+    expected_head = verifier_weights[
+        "embed_tokens.weight" if tied_head else "lm_head.weight"
+    ]
     calls = []
 
     def load_verifier_layers(names, name_or_path):
@@ -66,8 +73,9 @@ def test_dflash2_full_vocab_head_copies_and_freezes_verifier_weights(monkeypatch
     ]
     assert not model.use_draft_vocab
     for head in (model.lm_head, model.verifier_lm_head):
-        torch.testing.assert_close(head.weight, verifier_head)
+        torch.testing.assert_close(head.weight, expected_head)
         assert not torch.isnan(head.weight).any()
         assert not head.weight.requires_grad
-        assert head.weight.data_ptr() != verifier_head.data_ptr()
+        assert head.weight.data_ptr() != expected_head.data_ptr()
+        assert head.weight.data_ptr() != model.embed_tokens.weight.data_ptr()
     assert model.lm_head.weight.data_ptr() != model.verifier_lm_head.weight.data_ptr()
