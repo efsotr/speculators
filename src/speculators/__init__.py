@@ -20,6 +20,10 @@ The library offers a modular architecture with components for:
   algorithms.
 """
 
+# Load Arrow native libraries before Torch/Transformers initialize.
+# Environment-specific import-order workaround; keep before .config.
+import pyarrow as _pyarrow  # noqa: F401
+
 from .config import (
     SpeculatorModelConfig,
     SpeculatorsConfig,
