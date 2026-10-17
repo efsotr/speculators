@@ -17,6 +17,7 @@ from speculators.models.dflash2.model_definitions import (
     CandidateSelector,
     Qwen3DFlash2DecoderLayer,
 )
+from speculators.models.dflash2.hidden_loss import predicted_hidden_mse
 from speculators.models.utils import conditional_torch_compile
 
 __all__ = [
@@ -112,6 +113,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             ),
             "dpace_alpha": kwargs.get("dpace_alpha", 0.5),
             "selector_loss_alpha": kwargs.get("selector_loss_alpha", 1.0),
+            "hidden_state_mse_alpha": kwargs.get("hidden_state_mse_alpha", 0.0),
         }
         return dict(shared), dict(shared)
 
@@ -142,6 +144,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         gamma: float = 4.0,
         max_anchors: int = 512,
         selector_loss_alpha: float = 1.0,
+        hidden_state_mse_alpha: float = 0.0,
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
         **kwargs,
@@ -192,4 +195,23 @@ class DFlash2DraftModel(DFlashDraftModel):
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
         )
+        if hidden_state_mse_alpha:
+            # Offline last_hidden_states are before the verifier's final norm.
+            # Draft `hidden` is after its final norm, so compare the same stage.
+            with torch.no_grad():
+                predicted_hidden_states = self.verifier_norm(verifier_last_hidden_states)
+            mse = predicted_hidden_mse(
+                hidden,
+                predicted_hidden_states,
+                block_indices,
+                aligned_loss_mask,
+                loss_mask,
+                document_ids,
+                block_size=self.block_size,
+                sample_from_anchor=self.config.sample_from_anchor,
+            )
+            loss = loss + hidden_state_mse_alpha * mse
+            metrics["hidden_state_mse_sum"] = mse.detach()
+            metrics["hidden_state_mse_total"] = torch.ones_like(mse)
+            metrics["loss_sum"] = loss.detach()
         return None, loss, metrics

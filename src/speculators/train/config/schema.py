@@ -304,6 +304,12 @@ class GenerationArgs(_Group):
 
 
 class LossArgs(_Group):
+    hidden_state_mse_alpha: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="DFlash2 auxiliary MSE weight for hidden states at predicted "
+        "token positions. Zero disables the objective.",
+    )
     loss_implementation: Literal["fused", "eager"] = Field(
         default="fused",
         description="Loss implementation to use; eager is for compatibility and "
