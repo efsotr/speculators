@@ -135,7 +135,7 @@ def select_static_anchors(
             raise ValueError("Target hidden sequence must align with loss_mask")
         scores = score_target_positions(
             verifier_last_hidden_states, candidates, verifier_norm,
-            verifier_lm_head, strategy, chunk_size, sampling.get("score_backend", "auto"),
+            verifier_lm_head, strategy, chunk_size, sampling.get("score_backend", "triton"),
         )
         pool_size = (
             pool_size - math.floor(drop * pool_size)

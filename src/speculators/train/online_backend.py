@@ -2,7 +2,8 @@
 
 The default DataLoader path computes one batch per rank and sampler packing
 in a single verifier forward. FA2 is fixed; torch.compile defaults to enabled.
-Explicit varlen boundaries isolate its documents. Returned CPU tensors retain the file backend's prenorm contract.
+Explicit varlen boundaries isolate its documents. Both backends retain the file
+backend's prenorm contract; online returns CPU features, online_gpu retains CUDA.
 This implementation targets Transformers 5.14.1 and flash-attn 2.8.4.
 """
 import os
@@ -51,6 +52,8 @@ class PackedQwen3Features(torch.nn.Module):
 
 
 class OnlineTransfer(HiddenStatesTransfer):
+    returns_cuda_tensors = False
+
     def __init__(self, args, data_path):
         self.args = args
         self.data_path = data_path
@@ -110,7 +113,7 @@ class OnlineTransfer(HiddenStatesTransfer):
 
     @torch.no_grad()
     def get_packed(self, file_indices, max_tokens=None):
-        """Compute one unpadded packing, then split its CPU features by row.
+        """Compute one unpadded packing, then split its features by row.
 
         max_tokens is the sampler's per-rank budget. A single oversized row is
         prefix-truncated exactly as the sampler/CollateFn would truncate it.
@@ -146,7 +149,9 @@ class OnlineTransfer(HiddenStatesTransfer):
         cu_seqlens = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(
             0, dtype=torch.int32,
         ).to(self.device)
-        hidden = self.feature_forward(ids, positions, cu_seqlens, max(lengths)).cpu()
+        hidden = self.feature_forward(ids, positions, cu_seqlens, max(lengths))
+        if not self.returns_cuda_tensors:
+            hidden = hidden.cpu()
         return [
             {'hidden_states': features, 'token_ids': tokens}
             for features, tokens in zip(hidden.split(lengths), rows, strict=True)
@@ -160,8 +165,16 @@ class OnlineTransfer(HiddenStatesTransfer):
         raise RuntimeError('Local online forwards do not use generated handles')
 
 
+class OnlineGPUTransfer(OnlineTransfer):
+    """Reuse packed teacher compute while retaining features on the rank GPU."""
+
+    returns_cuda_tensors = True
+
+
 @HiddenStatesBackend.register('online')
 class OnlineBackend(HiddenStatesBackend):
+    transfer_type = OnlineTransfer
+
     @staticmethod
     def add_train_args(parser):
         pass
@@ -170,10 +183,15 @@ class OnlineBackend(HiddenStatesBackend):
     def add_launch_args(parser):
         pass
 
-    @staticmethod
-    def from_train_args(args, data_path):
+    @classmethod
+    def from_train_args(cls, args, data_path):
         if args.num_workers != 0:
             raise ValueError('online verifier requires data.num_workers: 0 (CUDA in training process)')
         if not args.target_layer_ids:
             raise ValueError('online verifier requires explicit draft.target_layer_ids')
-        return OnlineTransfer(args, data_path)
+        return cls.transfer_type(args, data_path)
+
+
+@HiddenStatesBackend.register('online_gpu')
+class OnlineGPUBackend(OnlineBackend):
+    transfer_type = OnlineGPUTransfer

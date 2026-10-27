@@ -226,7 +226,7 @@ class AnchorSamplingConfig(BaseModel):
     retain_fraction: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
     curriculum_preset: Literal["paper", "github"] = "paper"
     score_chunk_size: int = Field(default=1024, gt=0)
-    score_backend: Literal["auto", "eager", "compile", "triton"] = "auto"
+    score_backend: Literal["auto", "eager", "compile", "triton"] = "triton"
     seed: int = Field(default=0, ge=0)
     proposal: AnchorSamplingDistribution | None = None
     target: AnchorSamplingDistribution | None = None

@@ -72,12 +72,20 @@ def _setup_dataloader(
         max_batches=max_batches,
     )
     use_workers = num_workers > 0
+    # CUDA-producing datasets run in the trainer process. PyTorch's recursive
+    # pinning attempts Tensor.pin_memory() on every tensor, including CUDA
+    # features, so disable it for the mixed GPU-feature/CPU-metadata batch.
+    returns_cuda_tensors = getattr(
+        getattr(dataset, "transfer", None), "returns_cuda_tensors", False
+    )
+    if returns_cuda_tensors and use_workers:
+        raise ValueError("CUDA-producing hidden-state backends require num_workers=0")
     return DataLoader(
         dataset,
         batch_sampler=batch_sampler,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor if use_workers else None,
-        pin_memory=True,
+        pin_memory=not returns_cuda_tensors,
         collate_fn=CollateFn(
             total_seq_len,
             hidden_size,

@@ -7,6 +7,7 @@ One public type, :class:`~.schema.TrainConfig`, split across ``schema`` (fields)
 # Register built-in shard backends before resolving backend configuration.
 from speculators.train.shards import shard_backend as _shard_backend  # noqa: F401
 from speculators.train import online_backend as _online_backend  # noqa: F401
+from speculators.train import online_speculators_backend as _online_speculators_backend  # noqa: F401
 
 from .schema import TrainConfig
 
