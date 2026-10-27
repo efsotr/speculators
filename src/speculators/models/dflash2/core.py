@@ -115,7 +115,11 @@ class DFlash2DraftModel(DFlashDraftModel):
             "selector_loss_alpha": kwargs.get("selector_loss_alpha", 1.0),
             "hidden_state_mse_alpha": kwargs.get("hidden_state_mse_alpha", 0.0),
         }
-        return dict(shared), dict(shared)
+        train = dict(shared)
+        train["anchor_sampling"] = kwargs.get("anchor_sampling") or {"strategy": "uniform"}
+        val = dict(shared)
+        val["anchor_sampling"] = {"strategy": "uniform"}
+        return train, val
 
     def _predecessor_ids(
         self,
@@ -214,4 +218,5 @@ class DFlash2DraftModel(DFlashDraftModel):
             metrics["hidden_state_mse_sum"] = mse.detach()
             metrics["hidden_state_mse_total"] = torch.ones_like(mse)
             metrics["loss_sum"] = loss.detach()
+        metrics.update(getattr(self, "_anchor_sampling_metrics", {}))
         return None, loss, metrics

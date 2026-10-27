@@ -677,6 +677,9 @@ def main(cfg: TrainConfig):  # noqa: C901
         prefetch_factor=args.prefetch_factor,
         preprocess=preprocess,
         train_data_ratio=args.train_data_ratio,
+        max_train_samples=args.max_train_samples,
+        max_val_samples=args.max_val_samples,
+        max_sample_seq_len=args.max_sample_seq_len,
     )
 
     # Get trainer kwargs from model class
@@ -706,6 +709,8 @@ def main(cfg: TrainConfig):  # noqa: C901
         hidden_states_dtype=hidden_states_dtype,
         log_freq=args.log_freq,
         fsdp_shard=args.fsdp_shard,
+        fsdp_sharding_strategy=args.fsdp_sharding_strategy,
+        fsdp_reshard_after_forward=args.fsdp_reshard_after_forward,
         max_steps=args.max_steps,
     )
     trainer = Trainer(draft_model, trainer_config, train_loader, val_loader)

@@ -389,6 +389,8 @@ def run_benchmark(bench_args, train_args) -> dict:
         hidden_states_dtype=hidden_states_dtype,
         log_freq=1,
         fsdp_shard=train_args.fsdp_shard,
+        fsdp_sharding_strategy=train_args.fsdp_sharding_strategy,
+        fsdp_reshard_after_forward=train_args.fsdp_reshard_after_forward,
         max_steps=total_steps,
     )
 
@@ -455,6 +457,8 @@ def run_benchmark(bench_args, train_args) -> dict:
             "num_workers": train_args.num_workers,
             "prefetch_factor": train_args.prefetch_factor,
             "fsdp_shard": train_args.fsdp_shard,
+            "fsdp_sharding_strategy": train_args.fsdp_sharding_strategy,
+            "fsdp_reshard_after_forward": train_args.fsdp_reshard_after_forward,
             "num_gpus_used": num_gpus_used,
             "warmup_steps": bench_args.warmup_steps,
             "measured_steps": bench_args.measured_steps,

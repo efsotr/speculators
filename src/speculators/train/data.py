@@ -115,8 +115,10 @@ class BaseDataset(Dataset):
         raise NotImplementedError
 
     def __getitem__(self, index) -> BatchType | SampleUnavailable:
-        data = self._get_raw_data(index)
+        return self._finish_sample(self._get_raw_data(index))
 
+    def _finish_sample(self, data):
+        """Apply shared sample metadata and transforms after feature retrieval."""
         if isinstance(data, SampleUnavailable):
             return data
 
@@ -169,7 +171,16 @@ class ArrowDataset(BaseDataset):
         max_retries: int = DEFAULT_MAX_RETRIES,
         generation_validation_retries: int = 2,
         max_consecutive_generation_failures: int = 20,
+        max_samples: int | None = None,
+        max_sample_seq_len: int | None = None,
     ):
+        if max_samples is not None and max_samples <= 0:
+            raise ValueError("max_samples must be a positive integer or None")
+        if max_sample_seq_len is not None and (
+            type(max_sample_seq_len) is not int or max_sample_seq_len <= 0
+        ):
+            raise ValueError("max_sample_seq_len must be a positive integer or None")
+        self.max_sample_seq_len = max_sample_seq_len
         self.data = load_from_disk(datapath)
         if not 0.0 < train_ratio <= 1.0:
             raise ValueError(f"train_ratio must be in (0.0, 1.0], got {train_ratio}")
@@ -188,6 +199,8 @@ class ArrowDataset(BaseDataset):
                 f"train_ratio={train_ratio} gives split_idx={split_idx})"
             )
         self.start_file_idx = start
+        if max_samples is not None:
+            stop = min(stop, start + max_samples)
         self.data = self.data.select(range(start, stop))
 
         self.transfer = transfer or FileTransfer(Path(datapath) / "hidden_states")
@@ -205,6 +218,33 @@ class ArrowDataset(BaseDataset):
 
         # Delay super init so that `_compute_approx_lengths` has required data
         super().__init__(max_len, transform, hidden_states_dtype)
+
+    def __getitems__(self, indices):
+        """DataLoader fast path: one teacher call for the sampler's packing."""
+        get_packed = getattr(self.transfer, "get_packed", None)
+        if get_packed is None:
+            return [self[index] for index in indices]
+        if not len(indices):
+            return []
+        file_indices = [self._map_to_file_idx(int(index)) for index in indices]
+        features = get_packed(file_indices, max_tokens=self.max_len)
+        samples = []
+        for index, loaded in zip(indices, features, strict=True):
+            row = self.data[int(index)]
+            ids = loaded["token_ids"]
+            expected = row["input_ids"]
+            if self.max_sample_seq_len is not None:
+                expected = expected[:self.max_sample_seq_len]
+            expected = expected[:self.max_len]
+            if not torch.equal(ids, expected):
+                raise ValueError(f"Packed online token mismatch for dataset index {index}")
+            samples.append(self._finish_sample({
+                "hidden_states": loaded["hidden_states"][:, :-1].flatten(1),
+                "input_ids": ids,
+                "verifier_last_hidden_states": loaded["hidden_states"][:, -1],
+                "loss_mask": row["loss_mask"][:len(ids)],
+            }))
+        return samples
 
     def _map_to_file_idx(self, index: int):
         return index + self.start_file_idx
@@ -232,7 +272,10 @@ class ArrowDataset(BaseDataset):
 
     def _compute_approx_lengths(self) -> list[int]:
         """Get lengths of the dataset samples."""
-        return list(self.data.with_format(None)["seq_len"])
+        lengths = list(self.data.with_format(None)["seq_len"])
+        if self.max_sample_seq_len is not None:
+            lengths = [min(length, self.max_sample_seq_len) for length in lengths]
+        return lengths
 
     def _generate_hidden_states_once(
         self,
@@ -327,7 +370,14 @@ class ArrowDataset(BaseDataset):
         #   "token_ids": [seq_len]
         # }
 
-        if not torch.equal(loaded_hs["token_ids"], self.data[index]["input_ids"]):
+        expected_ids = self.data[index]["input_ids"]
+        # Online features may already be truncated before the teacher forward.
+        # Full file caches are still checked in full before slicing.
+        if self.max_sample_seq_len is not None and len(loaded_hs["token_ids"]) == min(
+            len(expected_ids), self.max_sample_seq_len
+        ):
+            expected_ids = expected_ids[:self.max_sample_seq_len]
+        if not torch.equal(loaded_hs["token_ids"], expected_ids):
             warnings.warn(
                 f"Loaded token ids {loaded_hs['token_ids']} for index {index} don't"
                 f"match input ids {self.data[index]['input_ids']}",
@@ -337,7 +387,7 @@ class ArrowDataset(BaseDataset):
                 reason=f"Cached token ids do not match sample {index}"
             )
 
-        return {
+        result = {
             "hidden_states": loaded_hs["hidden_states"][:, :-1].flatten(
                 1
             ),  # [seq_len, 3 * hidden_size]
@@ -347,6 +397,9 @@ class ArrowDataset(BaseDataset):
             ],  # [seq_len, hidden_size]
             "loss_mask": self.data[index]["loss_mask"],  # [seq_len]
         }
+        if self.max_sample_seq_len is not None:
+            result = {key: value[:self.max_sample_seq_len] for key, value in result.items()}
+        return result
 
 
 class CollateFn:

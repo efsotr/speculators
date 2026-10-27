@@ -1023,6 +1023,7 @@ def regenerate_responses(  # noqa: C901
     dataset's conversations on-policy, and writes boundary training samples
     (prompt + completion token ids with loss mask) to a JSONL file.
     """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if dataset not in REGEN_DATASETS and (split is not None or subset is not None):
         raise typer.BadParameter("--split and --subset only apply to dataset presets")
 

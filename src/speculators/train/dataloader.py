@@ -108,6 +108,9 @@ def create_train_val_loaders(
     preprocess: Callable[[BatchType], BatchType] | None,
     train_data_ratio: float = 0.9,
     max_train_batches: int | None = None,
+    max_train_samples: int | None = None,
+    max_val_samples: int | None = None,
+    max_sample_seq_len: int | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Create training and validation DataLoaders.
 
@@ -116,7 +119,7 @@ def create_train_val_loaders(
     :mod:`speculators.train.distributed`.
     """
     _limit_worker_threads()
-    noise_transform = AddUniformNoise(std=noise_std)
+    noise_transform = AddUniformNoise(std=noise_std) if noise_std else None
 
     if not (0.0 < train_data_ratio < 1.0):
         raise ValueError(f"train_data_ratio must be in (0, 1), got {train_data_ratio}")
@@ -131,6 +134,8 @@ def create_train_val_loaders(
         transform=noise_transform,
         train_ratio=train_data_ratio,
         split="train",
+        max_samples=max_train_samples,
+        max_sample_seq_len=max_sample_seq_len,
         model=verifier_name_or_path,
         hidden_states_dtype=hidden_states_dtype,
         request_timeout=request_timeout,
@@ -147,6 +152,8 @@ def create_train_val_loaders(
         on_generate=on_generate,
         train_ratio=train_data_ratio,
         split="val",
+        max_samples=max_val_samples,
+        max_sample_seq_len=max_sample_seq_len,
         model=verifier_name_or_path,
         hidden_states_dtype=hidden_states_dtype,
         request_timeout=request_timeout,

@@ -5,6 +5,7 @@ Precedence is ``flag > yaml > default`` via pydantic-settings source ordering;
 """
 
 import argparse
+import json
 import sys
 import types
 import warnings
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 
 from hs_connectors import HiddenStatesBackend
@@ -218,6 +219,10 @@ def _add_field_argument(
         kwargs["help"] = field.description
     extra = field.json_schema_extra if isinstance(field.json_schema_extra, dict) else {}
 
+    if isinstance(base, type) and issubclass(base, BaseModel):
+        parser.add_argument(flag, type=_parse_config_object, **kwargs)
+        return
+
     # A str field may draw its choices from a dynamic registry named indirectly by a
     # _CLI_CHOICES marker, so the choice set is resolved here (where the registry is
     # known) with no field-name literal.
@@ -245,6 +250,17 @@ def _add_field_argument(
     if choices:
         kwargs["choices"] = choices
     parser.add_argument(flag, **kwargs)
+
+
+def _parse_config_object(value: str) -> dict[str, Any]:
+    """Keep structured CLI values typed by the same model as YAML values."""
+    try:
+        result = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError("expected a JSON object") from exc
+    if not isinstance(result, dict):
+        raise argparse.ArgumentTypeError("expected a JSON object")
+    return result
 
 
 def _add_backend_arguments(parser: argparse.ArgumentParser) -> None:

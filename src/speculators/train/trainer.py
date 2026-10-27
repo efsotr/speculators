@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 import warnings
 from pathlib import Path
@@ -21,6 +22,7 @@ from transformers import (
 )
 
 from speculators.model import SpeculatorModel
+from speculators.train.compile_memory import CompileCycleCleanup
 from speculators.train.checkpointer import (
     BaseCheckpointer,
     DistributedCheckpointer,
@@ -33,12 +35,20 @@ from speculators.train.distributed import (
     is_distributed,
 )
 from speculators.train.graceful_shutdown import with_graceful_shutdown
+from speculators.train.memory_profile import CudaMemoryProfile
 from speculators.train.optimizers import build_optimizers
 from speculators.train.recovery import BatchRecoveryCoordinator
 from speculators.train.utils import normalize_counted_metrics
 
 root_logger = logging.getLogger("speculators")
 metric_logger = logging.getLogger("speculators.metrics")
+
+
+def _timing_event(event: str, **fields) -> None:
+    """Rank-zero JSON lifecycle records, separate from rich multiline metrics."""
+    if get_rank() == 0:
+        print("SPECULATORS_TIMING " + json.dumps(
+            {"event": event, "unix_seconds": time.time(), **fields}), flush=True)
 
 
 class _StepTimer:
@@ -138,6 +148,8 @@ class TrainerConfig(NamedTuple):
     hidden_states_dtype: torch.dtype = torch.bfloat16
     log_freq: int = 1
     fsdp_shard: bool = False
+    fsdp_sharding_strategy: Literal["no_shard", "full_shard"] = "full_shard"
+    fsdp_reshard_after_forward: bool = True
     max_steps: int | None = None
 
 
@@ -318,7 +330,12 @@ class Trainer:
         if not load_checkpoint and dist.get_rank() == 0:
             full_state_dict = self.model.state_dict()
 
-        apply_fully_sharded(self.model, param_dtype=self.config.hidden_states_dtype)
+        apply_fully_sharded(
+            self.model,
+            param_dtype=self.config.hidden_states_dtype,
+            sharding_strategy=self.config.fsdp_sharding_strategy,
+            reshard_after_forward=self.config.fsdp_reshard_after_forward,
+        )
 
         if load_checkpoint:
             self.checkpointer.load_model_state_dict(self.model)
@@ -461,6 +478,9 @@ class Trainer:
         timer = _StepTimer()
         recovery = BatchRecoveryCoordinator("training")
         remaining_steps = len(self.train_loader)
+        wall_step_started = time.perf_counter()
+        memory_profile = CudaMemoryProfile(self.local_rank, "train", epoch)
+        compile_cleanup = CompileCycleCleanup(self.device_type, "train")
         for local_step_rel, batch in enumerate(train_loader, 1):
             # local_step is 1-based index into the *full* epoch (not the slice).
             local_step = local_step_rel + skip_steps
@@ -490,8 +510,16 @@ class Trainer:
                 self.device_type, dtype=self.config.hidden_states_dtype
             ):
                 timer.mark("fetch")
+                call_kwargs = dict(self.config.train_call_kwargs or {})
+                if "anchor_sampling" in call_kwargs:
+                    call_kwargs.update(
+                        anchor_sampling_epoch=epoch,
+                        anchor_sampling_num_epochs=self.config.num_epochs,
+                        anchor_sampling_step=self.global_step,
+                        anchor_sampling_rank=self.rank,
+                    )
                 _draft_tokens, loss, metrics = self.model(
-                    **gpu_batch, **(self.config.train_call_kwargs or {})
+                    **gpu_batch, **call_kwargs
                 )
 
             timer.mark("fwd")
@@ -508,6 +536,7 @@ class Trainer:
 
             timer.mark("bwd")
             self._optimizers_step()
+            compile_cleanup.collect_if_compiled()
 
             current_lrs = {
                 type(opt).__name__: opt.param_groups[0]["lr"] for opt in self.optimizers
@@ -542,6 +571,9 @@ class Trainer:
                     },
                     extra={"step": self.global_step},
                 )
+            _timing_event("train_step", epoch=epoch, global_step=self.global_step,
+                          seconds=time.perf_counter() - wall_step_started)
+            memory_profile.record(self.global_step, batch)
             self.global_step += 1
 
             if (
@@ -558,6 +590,7 @@ class Trainer:
                 # Avoid saving back to back ay the end of each epoch
             ):
                 self.maybe_save_checkpoint(epoch, local_step=local_step)
+            wall_step_started = time.perf_counter()
 
     def _maybe_val_sync(self, batch_index: int) -> None:
         if not self.is_distributed or _VAL_SYNC_INTERVAL <= 0:
@@ -579,6 +612,8 @@ class Trainer:
         accumulated: dict[str, torch.Tensor] = {}
         num_batches = len(val_loader)
         recovery = BatchRecoveryCoordinator("validation")
+        memory_profile = CudaMemoryProfile(self.local_rank, "validation", epoch)
+        compile_cleanup = CompileCycleCleanup(self.device_type, "validation")
         for i, batch in enumerate(val_loader):
             self._maybe_val_sync(i)
             recovery.consume(
@@ -595,13 +630,23 @@ class Trainer:
             with torch.autocast(
                 self.device_type, dtype=self.config.hidden_states_dtype
             ):
+                call_kwargs = dict(self.config.val_call_kwargs or {})
+                if "anchor_sampling" in call_kwargs:
+                    call_kwargs.update(
+                        anchor_sampling_epoch=epoch,
+                        anchor_sampling_num_epochs=self.config.num_epochs,
+                        anchor_sampling_step=i,
+                        anchor_sampling_rank=self.rank,
+                    )
                 _draft_tokens, _loss, metrics = self.model(
-                    **gpu_batch, **(self.config.val_call_kwargs or {})
+                    **gpu_batch, **call_kwargs
                 )
 
             for k, v in metrics.items():
                 acc = accumulated.get(k)
                 accumulated[k] = v.float() if acc is None else acc + v.float()
+            compile_cleanup.collect_if_compiled()
+            memory_profile.record(i, batch)
 
         val_metrics: dict[str, float] = {}
         if accumulated:
@@ -633,6 +678,7 @@ class Trainer:
         ):
             return
 
+        checkpoint_started = time.perf_counter()
         root_logger.info(f"Saving checkpoint to {self.checkpointer.path / str(epoch)}")
         self.checkpointer.save_checkpoint(self.model, self.optimizers, epoch)
         if self.schedulers:
@@ -652,6 +698,7 @@ class Trainer:
                         old.unlink()
                 link_name.symlink_to(target)
         root_logger.info(f"Checkpoint saved to {self.checkpointer.path / str(epoch)}")
+        _timing_event("checkpoint", epoch=epoch, seconds=time.perf_counter() - checkpoint_started)
 
     def maybe_update_best(self, epoch: int, val_metrics: dict | None):
         if val_metrics is None or "loss_epoch" not in val_metrics:
@@ -660,6 +707,7 @@ class Trainer:
             return
 
         if self.config.save_best:
+            checkpoint_started = time.perf_counter()
             self.checkpointer.save_checkpoint(self.model, self.optimizers, epoch)
             if self.schedulers:
                 self.checkpointer.save_scheduler_state_dict(self.schedulers, epoch)
@@ -676,9 +724,15 @@ class Trainer:
         )
         if self.config.save_best:
             self.checkpointer.cleanup_keep_only_best(best_epoch=epoch)
+            _timing_event("checkpoint", epoch=epoch, seconds=time.perf_counter() - checkpoint_started)
 
     @with_graceful_shutdown()
     def run_training(self):
+        run_started = time.perf_counter()
+        launch_unix = os.environ.get("SPECULATORS_LAUNCH_UNIX_SECONDS")
+        if launch_unix is not None:
+            _timing_event("startup", seconds=max(0.0, time.time() - float(launch_unix)))
+        _timing_event("training_started")
         n_epochs = self.config.num_epochs
         for epoch in range(self.current_epoch, n_epochs):
             root_logger.info(f"Training epoch {epoch + 1}/{n_epochs} started")
@@ -699,7 +753,10 @@ class Trainer:
                 root_logger.warning("No val loader, skipping validation epoch")
             else:
                 root_logger.info(f"Validation epoch {epoch + 1}/{n_epochs} started")
+                validation_started = time.perf_counter()
                 val_metrics = self.val_epoch(epoch)
+                _timing_event("validation", epoch=epoch, steps=len(self.val_loader),
+                              seconds=time.perf_counter() - validation_started)
                 root_logger.info(f"Validation epoch {epoch + 1}/{n_epochs} completed")
 
             if self.is_distributed:
@@ -709,3 +766,5 @@ class Trainer:
 
             if self.is_distributed:
                 dist.barrier()
+        _timing_event("training_completed", epochs=n_epochs - self.current_epoch,
+                      seconds=time.perf_counter() - run_started)

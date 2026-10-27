@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import ClassVar
 
 import torch
@@ -19,7 +20,6 @@ from speculators.models.dflash.metrics import compute_metrics
 from speculators.models.dflash.model_definitions import Qwen3DFlashDecoderLayer
 from speculators.models.dflash.utils import (
     get_base_indices_for_anchored_blocks,
-    select_anchors,
 )
 from speculators.models.utils import (
     conditional_torch_compile,
@@ -299,7 +299,11 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             "per_position_loss_weight": per_position_loss_weight,
             "dpace_alpha": dpace_alpha,
         }
-        return dict(shared), dict(shared)
+        train = dict(shared)
+        train["anchor_sampling"] = kwargs.get("anchor_sampling") or {"strategy": "uniform"}
+        val = dict(shared)
+        val["anchor_sampling"] = {"strategy": "uniform"}
+        return train, val
 
     @property
     def mask_token_id(self) -> int:
@@ -339,12 +343,18 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         )
 
     @torch.compiler.disable
-    def _build_attention_mask(self, loss_mask, max_anchors, document_ids, device):
+    def _build_attention_mask(self, loss_mask, max_anchors, document_ids, device,
+                              selected_anchors=None):
         total_seq_len = loss_mask.shape[1]
 
-        anchor_positions, anchor_valid = select_anchors(
-            loss_mask, max_anchors, self.block_size
-        )
+        if selected_anchors is None:
+            from speculators.models.dflash.anchor_sampling import select_static_anchors
+            anchor_positions, anchor_valid = select_static_anchors(
+                loss_mask, max_anchors, self.block_size, document_ids,
+                sample_from_anchor=self.config.sample_from_anchor,
+            )
+        else:
+            anchor_positions, anchor_valid = selected_anchors
 
         full_attn_mask = None
         if self.uses_full_attn:
@@ -369,6 +379,111 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
 
         return full_attn_mask, sliding_window_attn_mask, anchor_positions, anchor_valid
 
+    @torch.compiler.disable
+    def _sample_training_anchors(
+        self, hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+        document_ids, position_ids, num_anchors, sampling, epoch, num_epochs,
+        step, rank,
+    ):
+        """Select before building query blocks; keep scoring outside compiled graphs.
+
+        A per-step generator is a deterministic function of checkpointed step,
+        epoch and rank. Validation therefore cannot consume training RNG state.
+        """
+        from speculators.models.dflash.anchor_sampling import (
+            select_static_anchors, valid_anchor_mask,
+        )
+
+        sampling = sampling or {"strategy": "uniform"}
+        strategy = sampling.get("strategy", "uniform")
+        if strategy != "uniform" and self.use_draft_vocab:
+            raise ValueError("Nonuniform anchor sampling requires the full verifier vocabulary")
+        if strategy == "round_occupancy" and type(self).__name__ != "DFlashDraftModel":
+            raise ValueError("round_occupancy requires a defined DFlash proposal; DFlash2 is unsupported")
+        device = hidden_states.device
+        generator = torch.Generator(device=device)
+        seed = (int(sampling.get("seed", 0)) + 1_000_003 * int(step)
+                + 97_409 * int(epoch) + 65_537 * int(rank)) % (2**63 - 1)
+        generator.manual_seed(seed)
+        if device.type == "cuda" and strategy != "uniform":
+            torch.cuda.synchronize(device)
+        started = time.perf_counter()
+        inclusion = None
+        if strategy == "round_occupancy":
+            from speculators.models.dflash.occupancy_sampling import (
+                build_occupancy_scores, select_occupancy_anchors,
+            )
+
+            # Statistics include terminal-adjacent starts. Pad only the context
+            # arrays so their synthetic query indices are safe; padded docs are
+            # invisible to attention and never become training candidates.
+            def pad(tensor, value=0):
+                shape = list(tensor.shape)
+                shape[1] = self.block_size
+                return torch.cat((tensor, tensor.new_full(shape, value)), dim=1)
+
+            scan_hidden, scan_ids = pad(hidden_states), pad(input_ids)
+            scan_mask = pad(loss_mask)
+            scan_last = pad(verifier_last_hidden_states)
+            scan_docs = pad(document_ids, -1)
+            scan_positions = position_ids
+            if scan_positions is None:
+                scan_positions = torch.arange(input_ids.shape[1], device=device).unsqueeze(0)
+            tail = scan_positions[:, -1:] + torch.arange(1, self.block_size + 1, device=device)
+            scan_positions = torch.cat((scan_positions, tail), dim=1)
+
+            @torch.no_grad()
+            def scan_draft(positions):
+                _, logits, _, _, _ = self._backbone_forward(
+                    scan_hidden, scan_ids, scan_mask, scan_last, scan_docs,
+                    scan_positions, max_anchors=positions.numel(),
+                    _selected_anchors=(positions, torch.ones_like(positions, dtype=torch.bool)),
+                    _anchor_scan=True,
+                )
+                return logits.reshape(-1, self.block_size, logits.shape[-1])
+
+            scores = build_occupancy_scores(
+                input_ids, loss_mask, document_ids, self.block_size,
+                sample_from_anchor=self.config.sample_from_anchor,
+                proposal=sampling["proposal"], target=sampling["target"],
+                score_chunk_size=sampling.get("score_chunk_size", 1024),
+                scan_draft=scan_draft,
+                verifier_last_hidden_states=verifier_last_hidden_states,
+                verifier_norm=self.verifier_norm, verifier_lm_head=self.verifier_lm_head,
+            )
+            candidates = valid_anchor_mask(
+                loss_mask, document_ids, self.block_size,
+                sample_from_anchor=self.config.sample_from_anchor,
+            )
+            anchors, valid, inclusion = select_occupancy_anchors(
+                scores, candidates, num_anchors, generator=generator,
+            )
+        else:
+            anchors, valid = select_static_anchors(
+                loss_mask, num_anchors, self.block_size, document_ids,
+                sampling=sampling, verifier_last_hidden_states=verifier_last_hidden_states,
+                verifier_norm=self.verifier_norm, verifier_lm_head=self.verifier_lm_head,
+                epoch=epoch, num_epochs=num_epochs,
+                sample_from_anchor=self.config.sample_from_anchor, generator=generator,
+            )
+        if device.type == "cuda" and strategy != "uniform":
+            torch.cuda.synchronize(device)
+        self._anchor_sampling_metrics = {
+            "anchor_selected_sum": valid.sum().detach().float(),
+            "anchor_selected_total": torch.ones((), device=device),
+            "anchor_score_seconds_sum": torch.tensor(time.perf_counter() - started, device=device),
+            "anchor_score_seconds_total": torch.ones((), device=device),
+        }
+        if inclusion is not None:
+            self._anchor_sampling_metrics.update({
+                "anchor_inclusion_sum": inclusion[valid].sum().detach().float(),
+                "anchor_inclusion_total": valid.sum().detach().float(),
+                "anchor_provenance_verified_sum": torch.tensor(
+                    float(sampling.get("provenance_verified", False)), device=device),
+                "anchor_provenance_verified_total": torch.ones((), device=device),
+            })
+        return anchors, valid
+
     def _backbone_forward(
         self,
         hidden_states: torch.Tensor,  # [1, total_seq_len, num_hidden*hidden_size]
@@ -388,14 +503,30 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         device = hidden_states.device
         total_seq_len = hidden_states.shape[1]
         num_anchors = kwargs.pop("max_anchors", 512)
+        selected_anchors = kwargs.pop("_selected_anchors", None)
+        anchor_scan = kwargs.pop("_anchor_scan", False)
+        sampling = kwargs.pop("anchor_sampling", None)
+        sampling_epoch = kwargs.pop("anchor_sampling_epoch", 0)
+        sampling_epochs = kwargs.pop("anchor_sampling_num_epochs", 1)
+        sampling_step = kwargs.pop("anchor_sampling_step", 0)
+        sampling_rank = kwargs.pop("anchor_sampling_rank", 0)
+        if sampling is None and not anchor_scan:
+            self._anchor_sampling_metrics = {}
 
         if position_ids is None:
             position_ids = torch.arange(
                 total_seq_len, dtype=torch.long, device=device
             ).unsqueeze(0)
 
+        if selected_anchors is None and sampling is not None:
+            selected_anchors = self._sample_training_anchors(
+                hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+                document_ids, position_ids, num_anchors, sampling, sampling_epoch,
+                sampling_epochs, sampling_step, sampling_rank,
+            )
         full_attn_mask, sliding_window_attn_mask, anchor_positions, anchor_valid = (
-            self._build_attention_mask(loss_mask, num_anchors, document_ids, device)
+            self._build_attention_mask(loss_mask, num_anchors, document_ids, device,
+                                       selected_anchors=selected_anchors)
         )
 
         mask_tokens_size = num_anchors * self.block_size
@@ -429,7 +560,9 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         )  # shape: [num_anchors*block_size]
 
         with torch.no_grad():
-            if anchored_block_indices.numel() < total_seq_len:
+            if anchor_scan:
+                targets = verifier_last_hidden_states.new_empty((1, 0, 0))
+            elif anchored_block_indices.numel() < total_seq_len:
                 target_indices = (
                     anchored_block_indices
                     if self.config.sample_from_anchor
@@ -517,4 +650,5 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             dpace_alpha=dpace_alpha,
             sample_from_anchor=self.config.sample_from_anchor,
         )
+        metrics.update(getattr(self, "_anchor_sampling_metrics", {}))
         return None, loss, metrics

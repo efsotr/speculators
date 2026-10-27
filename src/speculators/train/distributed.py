@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Literal
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
 logger = logging.getLogger("speculators")
@@ -195,7 +197,11 @@ def maybe_destroy_distributed() -> None:
 
 
 def apply_fully_sharded(
-    model: torch.nn.Module, param_dtype: torch.dtype = torch.bfloat16
+    model: torch.nn.Module,
+    param_dtype: torch.dtype = torch.bfloat16,
+    *,
+    sharding_strategy: Literal["no_shard", "full_shard"] = "full_shard",
+    reshard_after_forward: bool = True,
 ):
     """Applies torch FSDP fully_shard to the model, wrapping layers in FSDPModule.
 
@@ -208,9 +214,40 @@ def apply_fully_sharded(
         reduce_dtype=torch.float32,
     )
 
-    for layer in model.layers:  # type: ignore[union-attr]
-        fully_shard(layer, mp_policy=mp_policy)
+    mesh = None
+    if sharding_strategy == "no_shard":
+        # FSDP2 interprets a 2D mesh as (replicate, shard). A singleton shard
+        # group keeps full parameters/gradients/optimizer states on every rank;
+        # the replica group still synchronizes gradients. This stays on the
+        # FSDP2 state-dict and mixed-precision paths rather than switching to DDP.
+        mesh = init_device_mesh(
+            "cuda",
+            (dist.get_world_size(), 1),
+            mesh_dim_names=("replicate", "shard"),
+        )
+    elif sharding_strategy != "full_shard":
+        raise ValueError(f"Unsupported FSDP sharding strategy: {sharding_strategy}")
 
-    fully_shard(model, mp_policy=mp_policy)
+    logger.info(
+        "FSDP2 strategy=%s reshard_after_forward=%s world_size=%d",
+        sharding_strategy,
+        reshard_after_forward,
+        dist.get_world_size(),
+    )
+
+    for layer in model.layers:  # type: ignore[union-attr]
+        fully_shard(
+            layer,
+            mesh=mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=reshard_after_forward,
+        )
+
+    fully_shard(
+        model,
+        mesh=mesh,
+        mp_policy=mp_policy,
+        reshard_after_forward=reshard_after_forward,
+    )
 
     return model

@@ -194,12 +194,70 @@ class DraftArgs(_Group):
     )
 
 
+class AnchorSamplingDistribution(BaseModel):
+    """Explicit inference distribution used by round-occupancy scoring."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["greedy", "softmax"]
+    temperature: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    top_k: int | None = Field(default=None, ge=0)
+    top_p: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _validate_distribution(self) -> "AnchorSamplingDistribution":
+        values = (self.temperature, self.top_k, self.top_p)
+        if self.mode == "softmax" and any(value is None for value in values):
+            raise ValueError("softmax requires explicit temperature, top_k and top_p")
+        if self.mode == "greedy" and any(value is not None for value in values):
+            raise ValueError("greedy does not accept temperature, top_k or top_p")
+        return self
+
+
+class AnchorSamplingConfig(BaseModel):
+    """Selection policy; static scores describe the target's full vocabulary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: Literal[
+        "uniform", "target_flatness", "target_entropy_high", "target_entropy_low",
+        "entropy_curriculum", "round_occupancy",
+    ] = "uniform"
+    retain_fraction: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
+    curriculum_preset: Literal["paper", "github"] = "paper"
+    score_chunk_size: int = Field(default=1024, gt=0)
+    score_backend: Literal["auto", "eager", "compile", "triton"] = "auto"
+    seed: int = Field(default=0, ge=0)
+    proposal: AnchorSamplingDistribution | None = None
+    target: AnchorSamplingDistribution | None = None
+
+    @model_validator(mode="after")
+    def _validate_policy_fields(self) -> "AnchorSamplingConfig":
+        if self.strategy not in {
+            "target_flatness", "target_entropy_high", "target_entropy_low",
+        } and self.retain_fraction != 1.0:
+            raise ValueError("retain_fraction applies only to static ranked sampling")
+        if self.strategy != "entropy_curriculum" and self.curriculum_preset != "paper":
+            raise ValueError("curriculum_preset applies only to entropy_curriculum")
+        if self.strategy == "round_occupancy":
+            if self.proposal is None or self.target is None:
+                raise ValueError("round_occupancy requires explicit proposal and target")
+        elif self.proposal is not None or self.target is not None:
+            raise ValueError("proposal and target apply only to round_occupancy")
+        return self
+
+
 class DataArgs(_Group):
     data_path: str = Field(
         default="./output",
         description="Root data directory with the preprocessed dataset, vocab "
         "mappings (d2t.npy, t2d.npy), token frequencies (token_freq.pt), and hidden "
         "states.",
+    )
+    online_compile_hidden_states: bool = Field(
+        default=True,
+        description="Compile the online verifier hidden forward with torch.compile; "
+        "disable for eager FA2 comparisons. Packing and FA2 remain enabled.",
     )
     hidden_states_backend: str = Field(
         default="file",
@@ -210,10 +268,25 @@ class DataArgs(_Group):
     total_seq_len: int = Field(
         default=8192, description="Maximum training sequence length, in tokens."
     )
+    max_sample_seq_len: int | None = Field(
+        default=None, gt=0,
+        description="Right-truncate each sample to at most this many tokens before "
+        "packing, for both training and validation. Unset preserves prepared lengths.",
+    )
     train_data_ratio: float = Field(
         default=0.9,
         description="Fraction of the dataset used for training; the remainder is held "
         "out for validation.",
+    )
+    max_train_samples: int | None = Field(
+        default=None, gt=0,
+        description="Keep only the first N rows of the original training split. "
+        "Unset means all rows; oversized limits keep the entire split.",
+    )
+    max_val_samples: int | None = Field(
+        default=None, gt=0,
+        description="Keep only the first N rows of the original validation split. "
+        "Unset means all rows; oversized limits keep the entire split.",
     )
     noise_std: float = Field(
         default=0.05, description="Standard deviation for noise augmentation."
@@ -230,6 +303,11 @@ class DataArgs(_Group):
         default=512,
         description="Maximum anchor positions for DFlash-family and P-EAGLE training "
         "(default: 512).",
+    )
+    anchor_sampling: AnchorSamplingConfig = Field(
+        default_factory=AnchorSamplingConfig,
+        description="DFlash/DFlash2 anchor selection policy as a JSON object. "
+        "Defaults to uniform; round_occupancy supports DFlash only.",
     )
 
     @field_validator("hidden_states_dtype")
@@ -418,9 +496,19 @@ class TrainerArgs(_Group):
     )
     fsdp_shard: bool = Field(
         default=False,
-        description="Shard model parameters across GPUs with FSDP. By default "
-        "parameters are fully replicated (DDP-like). Enable when the model does not "
-        "fit in a single GPU's memory.",
+        description="Use FSDP2 instead of DDP for distributed training. "
+        "The fsdp_sharding_strategy controls parameter replication/sharding.",
+    )
+    fsdp_sharding_strategy: Literal["no_shard", "full_shard"] = Field(
+        default="full_shard",
+        description="FSDP2 parameter layout when fsdp_shard is enabled: "
+        "full_shard partitions across ranks; no_shard replicates across ranks "
+        "using a singleton shard dimension and reduces gradients across replicas.",
+    )
+    fsdp_reshard_after_forward: bool = Field(
+        default=True,
+        description="Reshard FSDP2 parameters after forward. False retains full "
+        "parameters until backward (ZeRO-2 style), avoiding the backward all-gather.",
     )
     max_steps: int | None = Field(
         default=None,
@@ -755,6 +843,29 @@ class TrainConfig(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _validate_anchor_sampling(self) -> "TrainConfig":
+        policy = self.data.anchor_sampling
+        if policy.strategy == "uniform":
+            return self
+        if self.speculator_type not in {"dflash", "dflash2"}:
+            raise ValueError("nonuniform anchor_sampling requires dflash or dflash2")
+        if self.data.max_anchors <= 0:
+            raise ValueError("nonuniform anchor_sampling requires max_anchors > 0")
+        if policy.strategy == "round_occupancy" and self.speculator_type != "dflash":
+            raise ValueError("round_occupancy supports dflash only")
+        if self.draft.d2t_path or self.draft.t2d_path:
+            raise ValueError("nonuniform anchor_sampling requires full vocabulary")
+        # draft_vocab_size alone can be a no-op, and pretrained configurations
+        # are loaded later. The model must additionally verify its actual vocab.
+        if (
+            policy.strategy == "entropy_curriculum"
+            and policy.curriculum_preset == "paper"
+            and (self.trainer.epochs - 1) * 0.03 >= 1.0
+        ):
+            raise ValueError("paper entropy_curriculum requires epochs < 35")
+        return self
+
     def flatten(self) -> dict[str, Any]:
         """The flat ``vars(args)``-shaped dict the ``SpeculatorModel`` classes
         consume via ``**kwargs``.
@@ -767,7 +878,8 @@ class TrainConfig(BaseSettings):
         for gname in _GROUPS:
             group = getattr(self, gname)
             for fname in type(group).model_fields:
-                values[fname] = getattr(group, fname)
+                value = getattr(group, fname)
+                values[fname] = value.model_dump() if isinstance(value, BaseModel) else value
         values.update(self._backend_args)
         return values
 
