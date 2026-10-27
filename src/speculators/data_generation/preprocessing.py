@@ -1,6 +1,5 @@
 import json
 import os
-from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -8,13 +7,13 @@ from typing import Literal, TypedDict
 import torch
 from datasets import Dataset as HFDataset
 from datasets import concatenate_datasets, load_dataset
+from huggingface_hub import hf_hub_download
 from transformers import (
     AutoProcessor,
     PreTrainedTokenizerBase,
     ProcessorMixin,
 )
 
-from speculators.data_generation.configs import DATASET_CONFIGS
 from speculators.data_generation.logging_utils import PipelineLogger
 from speculators.data_generation.render_client import render_conversation
 from speculators.data_generation.torch_utils import set_default_torch_num_threads
@@ -218,15 +217,18 @@ def _encode_render(
     render_endpoint: str,
     *,
     add_generation_prompt: bool,
+    max_length: int,
     tools: list[dict] | None = None,
 ) -> list[int]:
-    """Render a conversation prefix via the vLLM ``/render`` endpoint; return ids."""
+    """Render a conversation prefix via vLLM, bounded to the training window."""
     messages = _adapt_conv_for_vllm(conv_prefix)
     return render_conversation(
         render_endpoint,
         messages,
         add_generation_prompt=add_generation_prompt,
         tools=tools,
+        truncate_prompt_tokens=max_length,
+        truncation_side="right",
     )
 
 
@@ -274,6 +276,7 @@ def _render_boundary_rows(
             normalized_conv[:j],
             render_endpoint,
             add_generation_prompt=True,
+            max_length=max_length,
             tools=tools,
         )
         if len(prompt_ids) >= max_length:
@@ -285,6 +288,7 @@ def _render_boundary_rows(
             normalized_conv[: j + 1],
             render_endpoint,
             add_generation_prompt=False,
+            max_length=max_length,
             tools=tools,
         )
         if full_ids[: len(prompt_ids)] == prompt_ids:
@@ -297,6 +301,7 @@ def _render_boundary_rows(
                 normalized_conv[:j],
                 render_endpoint,
                 add_generation_prompt=False,
+                max_length=max_length,
                 tools=tools,
             )
             if full_ids[: len(hist_ids)] != hist_ids or boundary < len(hist_ids):
@@ -401,12 +406,18 @@ def _append_boundary_rows(
     max_length: int,
     minimum_valid_tokens: int | None,
 ) -> tuple[int, int, int]:
-    """Append rendered rows and return kept, unsupervised, and clipped counts."""
+    """Append rendered rows and return kept, unsupervised, and
+    maybe-truncated counts.
+    """
     num_kept = 0
     num_unsupervised = 0
-    num_clipped = 0
+    num_maybe_truncated = 0
 
     for row in rows:
+        # vLLM applies the requested right-side truncation before returning the
+        # render. A row at the limit may therefore have been truncated, but the
+        # render response does not expose the original length.
+        maybe_truncated = len(row["input_ids"]) >= max_length
         status = _append_row(
             results,
             row["input_ids"],
@@ -415,18 +426,20 @@ def _append_boundary_rows(
             minimum_valid_tokens,
         )
         num_unsupervised += status == "unsupervised"
-        # Kept-but-truncated only: a row clipped past its boundary reports
-        # as unsupervised above, and would otherwise be counted twice.
-        num_clipped += status == "kept" and len(row["input_ids"]) > max_length
+        num_maybe_truncated += maybe_truncated and status == "kept"
         if status == "kept":
             num_kept += 1
             if "messages" in results:
                 results["messages"].append(_adapt_conv_for_vllm(row["conv"]))
 
-    return num_kept, num_unsupervised, num_clipped
+    return num_kept, num_unsupervised, num_maybe_truncated
 
 
-def _warn_seq_length(num_unsupervised: int, num_clipped: int) -> None:
+def _warn_seq_length(
+    num_unsupervised: int,
+    num_maybe_truncated: int,
+    max_length: int,
+) -> None:
     """Warn when ``--seq-length`` cost supervision: all of it, or just the tail."""
     if num_unsupervised:
         log.warning(
@@ -434,13 +447,11 @@ def _warn_seq_length(num_unsupervised: int, num_clipped: int) -> None:
             f"If unexpected, consider increasing --seq-length to avoid "
             f"truncating assistant responses."
         )
-    if num_clipped:
+    if num_maybe_truncated:
         log.warning(
-            f"Clipped {num_clipped} rows at --seq-length: the assistant turn is "
-            f"cut mid-response, so its tail and closing tokens are never "
-            f"supervised. These rows are kept and look healthy. Raise "
-            f"--seq-length to supervise responses whole -- reasoning traces "
-            f"routinely exceed 2048 tokens."
+            f"{num_maybe_truncated} rows may have been truncated because "
+            f"their seq_length==max_seq_length ({max_length}). The assistant "
+            "turn may be cut mid-response. Raise --seq-length to reduce truncation."
         )
 
 
@@ -454,7 +465,7 @@ def _passthrough_pretokenized(
     """
     results: dict[str, list] = {"input_ids": [], "loss_mask": [], "seq_len": []}
     num_unsupervised = 0
-    num_clipped = 0
+    num_maybe_truncated = 0
     for ids, mask in zip(examples["input_ids"], examples["loss_mask"], strict=True):
         # A per-row length skew survives strict= column pairing; the collator
         # packs each key independently and would shift the mask silently.
@@ -467,8 +478,8 @@ def _passthrough_pretokenized(
         num_unsupervised += status == "unsupervised"
         # Kept-but-truncated only: a row clipped past its boundary reports as
         # unsupervised above, and would otherwise be counted twice.
-        num_clipped += status == "kept" and len(ids) > max_length
-    _warn_seq_length(num_unsupervised, num_clipped)
+        num_maybe_truncated += status == "kept" and len(ids) > max_length
+    _warn_seq_length(num_unsupervised, num_maybe_truncated, max_length)
     return results
 
 
@@ -513,7 +524,7 @@ def _preprocess_batch(
         tools_col = None
 
     num_unsupervised = 0
-    num_clipped = 0
+    num_maybe_truncated = 0
     num_convs_in = 0
     num_convs_empty = 0
 
@@ -530,17 +541,21 @@ def _preprocess_batch(
             continue
 
         num_convs_in += 1
-        num_kept, row_unsupervised, row_clipped = _append_boundary_rows(
+        num_kept, row_unsupervised, row_maybe_truncated = _append_boundary_rows(
             results,
             rows,
             max_length,
             minimum_valid_tokens,
         )
         num_unsupervised += row_unsupervised
-        num_clipped += row_clipped
+        num_maybe_truncated += row_maybe_truncated
         num_convs_empty += num_kept == 0
 
-    _warn_seq_length(num_unsupervised, num_clipped)
+    _warn_seq_length(
+        num_unsupervised,
+        num_maybe_truncated,
+        max_length,
+    )
     if num_convs_empty:
         log.warning(
             f"{num_convs_empty}/{num_convs_in} conversations produced no training "
@@ -663,45 +678,81 @@ def _load_hf_dataset(spec: str) -> tuple[HFDataset, None]:
 
     raw_dataset = load_dataset(hf_id, name=subset, split=split)
 
-    if "conversations" not in raw_dataset.column_names:
+    columns = set(raw_dataset.column_names)
+    if "conversations" not in columns and not {"input_ids", "loss_mask"} <= columns:
         raise ValueError(
             f"HuggingFace dataset '{hf_id}' (split '{split}') is not in "
-            f"conversations format: expected a 'conversations' column but found "
-            f"{raw_dataset.column_names}. Pass a dataset already in conversations "
-            f"format, or add a preset to DATASET_CONFIGS with a normalize_fn."
+            "a supported format: expected a conversations format with a "
+            "'conversations' column or a pre-tokenized format with both "
+            f"'input_ids' and 'loss_mask', but found {raw_dataset.column_names}. "
+            "Pass a dataset in one of those formats."
         )
 
     return raw_dataset, None
 
 
+def _load_hf_jsonl_file(spec: str) -> tuple[HFDataset, None]:
+    """Download and load one JSON/JSONL file from a Hugging Face dataset repo.
+
+    The URI form is ``hf://datasets/<org>/<repo>/<path>``. Keeping the
+    download here means the normal prepare-data path still handles rendering,
+    pretokenized pass-through, and output caching uniformly.
+    """
+    match spec.removeprefix("hf://datasets/").split("/", 2):
+        case [organization, dataset, filename] if all(
+            (organization, dataset, filename)
+        ):
+            pass
+        case _:
+            raise ValueError(
+                f"Invalid Hugging Face JSONL URI '{spec}'. Expected "
+                "hf://datasets/<organization>/<dataset>/<file>.jsonl."
+            )
+
+    repo_id = f"{organization}/{dataset}"
+    if not filename.endswith((".json", ".jsonl")):
+        raise ValueError(
+            f"Hugging Face source '{spec}' must point to a .json or .jsonl file."
+        )
+    local_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type="dataset",
+    )
+    return load_dataset("json", data_files=local_path, split="train"), None
+
+
 def load_raw_dataset(
     train_data_path: str,
-) -> tuple[HFDataset, Callable[[dict], dict] | None]:
+) -> tuple[HFDataset, None]:
     """Load a raw dataset from one of several source types.
 
     Resolution order:
-        1. Local ``.json``/``.jsonl`` file.
-        2. Local directory: recursively load all ``*.json``/``*.jsonl`` files
+        1. ``hf://datasets/<org>/<repo>/<file>.jsonl`` Hugging Face JSONL URI.
+        2. Local ``.json``/``.jsonl`` file.
+        3. Local directory: recursively load all ``*.json``/``*.jsonl`` files
            as a single dataset.
-        3. Named preset from ``DATASET_CONFIGS``.
         4. ``hf:<id>[:<subset>:<split>]`` for an arbitrary HuggingFace dataset.
 
     Args:
-        train_data_path: File path, directory path, preset name, or ``hf:`` spec.
+        train_data_path: File path, directory path, or ``hf:`` spec.
 
     Returns:
-        Tuple of (raw_dataset, normalize_fn). normalize_fn is None for sources
-        already in conversations format.
+        Tuple of (raw_dataset, None).
 
     Raises:
         ValueError: If the source cannot be resolved or a local directory
             contains no ``.json``/``.jsonl`` files.
     """
-    # 1. Local file
+    # 1. Hugging Face dataset repository JSONL file.
+    if train_data_path.startswith("hf://datasets/"):
+        return _load_hf_jsonl_file(train_data_path)
+
+    # 2. Local file
     if train_data_path.endswith((".jsonl", ".json")):
         return load_dataset("json", data_files=train_data_path, split="train"), None
 
-    # 2. Local directory
+    # 3. Local directory
     path = Path(train_data_path)
     if path.is_dir():
         data_files = sorted(
@@ -713,24 +764,16 @@ def load_raw_dataset(
             )
         return load_dataset("json", data_files=data_files, split="train"), None
 
-    # 3. Named preset
-    if train_data_path in DATASET_CONFIGS:
-        config = DATASET_CONFIGS[train_data_path]
-        raw_dataset = load_dataset(
-            config.hf_path, name=config.subset, split=config.split
-        )
-        if config.filter_fn is not None:
-            raw_dataset = raw_dataset.filter(config.filter_fn)
-        return raw_dataset, config.normalize_fn
-
     # 4. Arbitrary HuggingFace dataset
     if train_data_path.startswith("hf:"):
         return _load_hf_dataset(train_data_path)
 
     raise ValueError(
         f"Unsupported dataset: {train_data_path}. Supported: local .json/.jsonl "
-        f"file, local directory of .json/.jsonl files, hf:<id>[:<subset>:<split>], "
-        f"or a preset {list(DATASET_CONFIGS.keys())}."
+        "file, hf://datasets/<org>/<repo>/<file>.jsonl, local directory of "
+        ".json/.jsonl files, or hf:<id>[:<subset>:<split>]. "
+        "Use `speculators regenerate-responses` for raw presets, "
+        "then pass its generated JSONL to prepare-data."
     )
 
 
@@ -770,6 +813,7 @@ def load_and_preprocess_dataset(
     minimum_valid_tokens: int | None = None,
     allow_empty_output: bool = False,
     trust_remote_code: bool = False,
+    skip_token_freq: bool = True,
 ) -> tuple[HFDataset, ProcessorLike]:
     """Load, tokenize, and preprocess a dataset for speculator training.
 
@@ -821,7 +865,7 @@ def load_and_preprocess_dataset(
     processed_datasets = []
     for train_data_path in train_data_paths:
         log.subsection(f"Processing {train_data_path}")
-        raw_dataset, normalize_fn = load_raw_dataset(train_data_path)
+        raw_dataset, _ = load_raw_dataset(train_data_path)
         raw_dataset = raw_dataset.shuffle(seed=seed)
 
         if max_samples is not None and len(raw_dataset) > 3 * max_samples:
@@ -830,19 +874,19 @@ def load_and_preprocess_dataset(
             # after combining datasets and shuffling
             raw_dataset = raw_dataset.select(range(3 * max_samples))
 
-        if normalize_fn is not None:
-            raw_dataset = raw_dataset.map(
-                normalize_fn,
-                num_proc=build_dataset_num_proc,
-                keep_in_memory=True,  # skip caching
-            )
-
         pretokenized = {"input_ids", "loss_mask"} <= set(raw_dataset.column_names)
-        if not pretokenized and not processor_has_chat_template:
+        # With a render endpoint the chat template is applied server-side, so a
+        # local processor without a chat_template attribute is fine.
+        if (
+            not pretokenized
+            and not processor_has_chat_template
+            and render_endpoint is None
+        ):
             raise ValueError(
                 f"Processor for {target_model_path} does not support chat templates. "
-                "Please use a model with a pre-configured chat template or provide "
-                "pre-tokenized input_ids and loss_mask columns."
+                "Please use a model with a pre-configured chat template, provide "
+                "pre-tokenized input_ids and loss_mask columns, or pass "
+                "--render-endpoint so vLLM renders conversations server-side."
             )
 
         log.info(f"Loaded {len(raw_dataset)} samples")
@@ -871,11 +915,12 @@ def load_and_preprocess_dataset(
             "--allow-empty-output if an empty dataset is intentional."
         )
 
-    log.subsection("Computing token frequency distribution")
-    save_token_frequency_distribution(
-        dataset=combined_dataset,
-        output_path=token_freq_path,
-    )
+    if not skip_token_freq:
+        log.subsection("Computing token frequency distribution")
+        save_token_frequency_distribution(
+            dataset=combined_dataset,
+            output_path=token_freq_path,
+        )
 
     if len(combined_dataset) == 0:
         log.warning("No samples remain after preprocessing; skipping visualization")

@@ -25,6 +25,7 @@ from speculators.models.utils import (
     conditional_torch_compile,
     flatten_rope_parameters,
     resolve_target_layer_ids,
+    resolve_verifier_norm_class,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ _compiled_create_block_mask = torch.compile(create_block_mask)
 @SpeculatorModel.register("dflash")
 class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
     config_class: ClassVar[type[DFlashSpeculatorConfig]] = DFlashSpeculatorConfig  # type: ignore[misc]
+    supports_gradient_checkpointing = True  # noqa: D003  # Qwen3DFlashDecoderLayer inherits GradientCheckpointingLayer
     _no_split_modules = ["Qwen3DFlashDecoderLayer"]
     _keys_to_ignore_on_load_missing: ClassVar[list[str]] = [  # type: ignore[misc]
         "embed_tokens.weight",
@@ -97,10 +99,13 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                 for layer_idx in range(num_draft_layers)
             ]
         )
-        self.sliding_window = tl_config.sliding_window
+        # Both are optional: declared only for alternating/sliding attention.
+        self.sliding_window = getattr(tl_config, "sliding_window", None)
         self.sliding_window_indices = [
             i
-            for i, layer_type in enumerate(tl_config.layer_types)
+            for i, layer_type in enumerate(
+                getattr(tl_config, "layer_types", None) or []
+            )
             if layer_type == "sliding_attention"
         ]
         self.uses_sliding_window_attn = bool(self.sliding_window_indices)
@@ -123,7 +128,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             config.transformer_layer_config.hidden_size,
             eps=config.transformer_layer_config.rms_norm_eps,  # type: ignore[arg-type]
         )
-        self.verifier_norm = Qwen3RMSNorm(
+        self.verifier_norm = resolve_verifier_norm_class(config)(
             config.transformer_layer_config.hidden_size,
             eps=config.transformer_layer_config.rms_norm_eps,  # type: ignore[arg-type]
         )

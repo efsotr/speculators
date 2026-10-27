@@ -135,3 +135,20 @@ def test_score_backend_and_shared_chunk_configuration():
         assert config.score_backend == backend
     # Uniform bypasses scoring; a shared default YAML may retain its chunk size.
     assert AnchorSamplingConfig(strategy="uniform", score_chunk_size=256).score_chunk_size == 256
+
+
+def test_v08_packing_and_schedule_can_be_reproduced():
+    cfg = TrainConfig.resolve([
+        "--verifier-name-or-path", "m", "--packing-seed", "0",
+        "--scheduler-total-steps", "70991",
+    ])
+    assert cfg.data.packing_seed == 0
+    assert cfg.flatten()["packing_seed"] == 0
+    assert cfg.scheduler.scheduler_total_steps == 70991
+    assert TrainConfig().data.packing_seed is None
+
+
+def test_removed_noise_rejects_nonzero_instead_of_ignoring_it():
+    assert TrainConfig(data={"noise_std": 0.0}).data.noise_std == 0.0
+    with pytest.raises(ValidationError):
+        TrainConfig(data={"noise_std": 0.05})

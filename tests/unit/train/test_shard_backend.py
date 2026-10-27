@@ -64,8 +64,8 @@ class ShardTests(unittest.TestCase):
             for workers in (0,2):
                 train,val = create_train_val_loaders(
                     data_path=str(output), total_seq_len=16, hidden_states_dtype=torch.bfloat16,
-                    noise_std=0.0, transfer=ShardTransfer(output), vllm_endpoint='http://127.0.0.1:1/v1',
-                    on_missing='raise', on_generate='delete', verifier_name_or_path='models/Qwen3-4B',
+                    transfer=ShardTransfer(output), vllm_endpoint='http://127.0.0.1:1/v1',
+                    on_missing='raise', verifier_name_or_path='models/Qwen3-4B',
                     request_timeout=1,max_retries=0,generation_validation_retries=0,
                     max_consecutive_generation_failures=1, hidden_size=2560,num_target_layers=3,
                     num_workers=workers,prefetch_factor=1,preprocess=None,train_data_ratio=0.5)
@@ -134,8 +134,8 @@ class ShardTests(unittest.TestCase):
                     transfer = HiddenStatesBackend.registry[args.hidden_states_backend].from_train_args(args,args.data_path)
                     train, val = create_train_val_loaders(
                         data_path=args.data_path,total_seq_len=args.total_seq_len,
-                        hidden_states_dtype=torch.bfloat16,noise_std=0.0,transfer=transfer,
-                        vllm_endpoint='http://127.0.0.1:1/v1',on_missing=args.on_missing,on_generate='delete',
+                        hidden_states_dtype=torch.bfloat16,transfer=transfer,
+                        vllm_endpoint='http://127.0.0.1:1/v1',on_missing=args.on_missing,
                         verifier_name_or_path=args.verifier_name_or_path,request_timeout=1,max_retries=0,
                         generation_validation_retries=0,max_consecutive_generation_failures=1,
                         hidden_size=2560,num_target_layers=3,num_workers=0,prefetch_factor=1,

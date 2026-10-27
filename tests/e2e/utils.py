@@ -14,10 +14,15 @@ from pathlib import Path
 from textwrap import indent
 
 import pytest
+from datasets import Dataset as HFDataset
+from datasets import load_dataset
 from loguru import logger
 from PIL import Image
 
-from speculators.data_generation.preprocessing import load_raw_dataset
+from speculators.data_generation.configs import (
+    DATASET_CONFIGS,
+    _normalize_sharegpt4v_coco,
+)
 
 __all__ = [
     "SCRIPTS_DIR",
@@ -43,8 +48,9 @@ def purge_newfiles(fn: Callable[..., Path]):
 
     On exit, deletes top-level files in the resolved directory whose mtime is
     newer than when the wrapped function returned.  Does not recurse into
-    subdirectories.  This prevents generated artifacts (e.g. ``d2t.npy``,
-    ``t2d.npy`` potentially cached by ``train.py``) from persisting in
+    subdirectories.  This prevents generated artifacts (e.g. size-keyed
+    ``d2t-*.npy`` and ``t2d-*.npy`` files potentially cached by ``train.py``)
+    from persisting in
     shared directories (such as the HF snapshot cache) between test runs.
     """
 
@@ -306,6 +312,14 @@ def launch_mooncake_master_context(port: int):
         stop_mooncake_master(process)
 
 
+def load_sharegpt4v_coco_fixture() -> HFDataset:
+    """Load raw multimodal fixture data for pipeline tests, not on-policy training."""
+    config = DATASET_CONFIGS["sharegpt4v_coco"]
+    return load_dataset(config.hf_path, name=config.subset, split=config.split).filter(
+        config.filter_fn
+    )
+
+
 def setup_dummy_sharegpt4v_coco(coco_dir: Path):
     """Enable ShareGPT4V to be used without downloading the actual COCO dataset."""
     coco_dir.mkdir(parents=True, exist_ok=True)
@@ -314,7 +328,7 @@ def setup_dummy_sharegpt4v_coco(coco_dir: Path):
     dummy_image_path = coco_dir / "dummy.png"
     dummy_image.save(dummy_image_path)
 
-    raw_dataset, normalize_fn = load_raw_dataset("sharegpt4v_coco")
+    raw_dataset = load_sharegpt4v_coco_fixture()
 
     # Use symlinks to avoid copying the image
     for raw_path in raw_dataset["image"]:
@@ -333,11 +347,24 @@ def run_prepare_data(
     seq_length: int = 512,
     timeout: float | None = None,
     render_endpoint: str | None = None,
+    skip_token_freq: bool = True,
 ):
-    """Tokenize data using prepare_data.py."""
+    """Tokenize data using the speculators prepare-data command."""
+    if data == "sharegpt4v_coco":
+        # Preserve the existing off-policy multimodal test fixture as an explicit
+        # conversation file. Production preparation no longer resolves presets.
+        fixture = load_sharegpt4v_coco_fixture()
+        fixture = fixture.map(_normalize_sharegpt4v_coco, keep_in_memory=True)
+        fixture_path = data_path.with_suffix(".jsonl")
+        fixture_path.parent.mkdir(parents=True, exist_ok=True)
+        fixture.select_columns(["conversations"]).to_json(str(fixture_path))
+        data = str(fixture_path)
+
     cmd = [
         sys.executable,
-        str(SCRIPTS_DIR / "prepare_data.py"),
+        "-m",
+        "speculators",
+        "prepare-data",
         "--model",
         model,
         "--data",
@@ -351,11 +378,13 @@ def run_prepare_data(
     ]
     if render_endpoint is not None:
         cmd += ["--render-endpoint", render_endpoint]
+    if not skip_token_freq:
+        cmd += ["--no-skip-token-freq"]
     logger.info("Preparing data: {}", " ".join(cmd))
     result = subprocess.run(  # noqa: S603
         cmd, check=False, timeout=timeout
     )
-    assert result.returncode == 0, "prepare_data.py failed"
+    assert result.returncode == 0, "speculators prepare-data failed"
 
 
 def run_data_generation_offline(
@@ -370,7 +399,9 @@ def run_data_generation_offline(
 ):
     datagen_cmd = [
         sys.executable,
-        str(SCRIPTS_DIR / "data_generation_offline.py"),
+        "-m",
+        "speculators",
+        "generate-offline-data",
         "--preprocessed-data",
         str(data_path),
         "--endpoint",
@@ -393,7 +424,7 @@ def run_data_generation_offline(
         datagen_cmd, stderr=subprocess.PIPE, text=True, check=False, timeout=timeout
     )
     assert result.returncode == 0, (
-        f"data_generation_offline.py failed:\n{result.stderr}"
+        f"speculators generate-offline-data failed:\n{result.stderr}"
     )
 
 
@@ -403,7 +434,7 @@ def run_training(
     save_path: Path,
     seq_length: int = 512,
     port: int = 8321,
-    draft_vocab_size: int = 8192,
+    draft_vocab_size: int | None = 8192,
     epochs: int = 1,
     lr: float = 3e-4,
     online: bool = True,
@@ -421,7 +452,9 @@ def run_training(
 ):
     train_cmd = [
         sys.executable,
-        str(SCRIPTS_DIR / "train.py"),
+        "-m",
+        "speculators",
+        "train",
         "--verifier-name-or-path",
         model,
         "--data-path",
@@ -430,8 +463,6 @@ def run_training(
         f"http://localhost:{port}/v1",
         "--save-path",
         str(save_path),
-        "--draft-vocab-size",
-        str(draft_vocab_size),
         "--epochs",
         str(epochs),
         "--lr",
@@ -445,6 +476,8 @@ def run_training(
         "--hidden-states-backend",
         hidden_states_backend,
     ]
+    if draft_vocab_size is not None:
+        train_cmd += ["--draft-vocab-size", str(draft_vocab_size)]
     if mooncake_master is not None:
         train_cmd += ["--mooncake-master", mooncake_master]
     if mooncake_metadata_server is not None:
@@ -452,12 +485,7 @@ def run_training(
     if mooncake_protocol is not None:
         train_cmd += ["--mooncake-protocol", mooncake_protocol]
     if online:
-        train_cmd += [
-            "--on-missing",
-            "generate",
-            "--on-generate",
-            "delete",
-        ]
+        train_cmd += ["--on-missing", "generate"]
     else:
         train_cmd += [
             "--on-missing",
@@ -476,7 +504,7 @@ def run_training(
     result = subprocess.run(  # noqa: S603
         train_cmd, stderr=subprocess.PIPE, text=True, check=False, timeout=timeout
     )
-    assert result.returncode == 0, f"train.py failed:\n{result.stderr}"
+    assert result.returncode == 0, f"speculators train failed:\n{result.stderr}"
 
 
 def run_stitch_mtp(
@@ -487,7 +515,9 @@ def run_stitch_mtp(
 ):
     cmd = [
         sys.executable,
-        str(SCRIPTS_DIR / "stitch_mtp.py"),
+        "-m",
+        "speculators",
+        "stitch-mtp",
         str(finetuned_checkpoint),
         verifier_path,
         "--output-path",
@@ -497,7 +527,7 @@ def run_stitch_mtp(
     result = subprocess.run(  # noqa: S603
         cmd, capture_output=True, text=True, check=False, timeout=timeout
     )
-    assert result.returncode == 0, f"stitch_mtp.py failed:\n{result.stderr}"
+    assert result.returncode == 0, f"speculators stitch-mtp failed:\n{result.stderr}"
 
 
 def run_vllm_engine(

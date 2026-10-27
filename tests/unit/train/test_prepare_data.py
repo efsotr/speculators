@@ -146,9 +146,38 @@ def test_pretokenized_data_does_not_require_chat_template(
     assert dataset[0]["input_ids"].tolist() == [1, 2, 3]
 
 
+def test_huggingface_jsonl_uri_downloads_dataset_file(monkeypatch: pytest.MonkeyPatch):
+    raw = HFDataset.from_dict({"input_ids": [[1, 2]], "loss_mask": [[0, 1]]})
+    calls = {}
+
+    def fake_download(**kwargs):
+        calls.update(kwargs)
+        return "/tmp/regenerated.jsonl"
+
+    def fake_load_dataset(*args, **kwargs):
+        calls["load_dataset"] = (args, kwargs)
+        return raw
+
+    monkeypatch.setattr(preprocessing_module, "hf_hub_download", fake_download)
+    monkeypatch.setattr(preprocessing_module, "load_dataset", fake_load_dataset)
+
+    loaded, normalize_fn = preprocessing_module.load_raw_dataset(
+        "hf://datasets/example-org/regenerated-responses/qwen3.jsonl"
+    )
+
+    assert loaded is raw
+    assert normalize_fn is None
+    assert calls["repo_id"] == "example-org/regenerated-responses"
+    assert calls["filename"] == "qwen3.jsonl"
+    assert calls["repo_type"] == "dataset"
+    assert calls["load_dataset"][0] == ("json",)
+
+
 def test_conversation_data_still_requires_chat_template(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
+    """Without a render endpoint, conversation data still fails fast when the
+    processor exposes no chat template."""
     raw = HFDataset.from_dict(
         {
             "conversations": [
@@ -176,3 +205,56 @@ def test_conversation_data_still_requires_chat_template(
             build_dataset_num_proc=1,
             token_freq_path=tmp_path / "token_freq.pt",
         )
+
+
+def test_render_endpoint_bypasses_chat_template_requirement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Server-side rendering needs no local chat template: the processor's
+    template is never used when a render endpoint is provided."""
+    raw = HFDataset.from_dict(
+        {
+            "conversations": [
+                [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ]
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        preprocessing_module,
+        "load_processor",
+        lambda *a, **k: _NoChatTemplateProcessor(),
+    )
+    monkeypatch.setattr(
+        preprocessing_module, "load_raw_dataset", lambda _path: (raw, None)
+    )
+    processed = HFDataset.from_dict(
+        {
+            "input_ids": [[1, 2, 3]],
+            "loss_mask": [[0, 1, 1]],
+            "seq_len": [3],
+        }
+    )
+    processed.set_format(type="torch")
+    monkeypatch.setattr(
+        preprocessing_module,
+        "build_speculator_training_dataset",
+        lambda *a, **k: processed,
+    )
+    monkeypatch.setattr(
+        preprocessing_module, "save_token_frequency_distribution", lambda **k: None
+    )
+    monkeypatch.setattr(preprocessing_module, "_visualize_sample", lambda *a, **k: None)
+
+    dataset, _ = load_and_preprocess_dataset(
+        "custom-model",
+        ["conversations.jsonl"],
+        seq_length=8,
+        build_dataset_num_proc=1,
+        token_freq_path=tmp_path / "token_freq.pt",
+        render_endpoint="http://localhost:8000",
+    )
+
+    assert len(dataset) == 1

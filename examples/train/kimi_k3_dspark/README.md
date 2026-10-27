@@ -27,7 +27,7 @@ SOURCE_JSONL=/path/to/data.jsonl \
   sbatch --export=ALL,SOURCE_JSONL examples/train/kimi_k3_dspark/prepare_data.sbatch
 ```
 
-Writes the Arrow dataset, token frequencies, and vocabulary mapping to `runs/kimi_k3_dspark/data`. Everything below expects it to exist.
+Writes the Arrow dataset and token frequencies to `runs/kimi_k3_dspark/data`. Everything below expects the prepared data to exist.
 
 ### 2. Mooncake master
 
@@ -60,7 +60,7 @@ Add `MAX_STEPS=20` for a smoke run. Other useful overrides: `MODEL_PATH`, `DATA_
 
 ## Running all four under Slurm
 
-`run.sbatch` does exactly the above on a 3-node allocation: nodes 0-1 extract, node 2 trains, the Mooncake master shares node 0. It resolves the extractor head's fabric address, waits for `/health`, then launches training, and stops the extractors and master when training exits.
+`run.sbatch` does exactly the above on a 3-node allocation: nodes 0-1 extract, node 2 trains, the Mooncake master shares node 0. It resolves the extractor head's fabric address, waits for `/health`, then launches training and stops the extractors and master when training exits.
 
 ```bash
 FABRIC_SUBNET=<subnet-prefix> sbatch --export=ALL examples/train/kimi_k3_dspark/run.sbatch
@@ -70,4 +70,4 @@ Logs and checkpoints land in `runs/kimi_k3_dspark/<run-name>/`.
 
 ## Integrity and failure handling
 
-Every Mooncake sample carries a versioned shape/dtype/CRC32 manifest. The producer rejects non-finite tensors before publication; the consumer verifies checksum and finiteness before training. Invalid round trips are regenerated twice, independently of the HTTP retry budget. An exhausted sample is dropped; if that leaves a rank with no valid samples it runs a locally empty zero-loss batch and still participates in DDP. Twenty consecutive failed round trips in one worker trip a synchronized circuit breaker.
+Every Mooncake sample carries a versioned shape/dtype manifest. The producer rejects non-finite tensors before publication; the consumer verifies shape, dtype, and finiteness before training. Invalid round trips are regenerated twice, independently of the HTTP retry budget. An exhausted sample is dropped; if that leaves a rank with no valid samples it runs a locally empty zero-loss batch and still participates in DDP. Twenty consecutive failed round trips in one worker trip a synchronized circuit breaker.

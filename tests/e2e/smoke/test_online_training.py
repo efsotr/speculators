@@ -4,7 +4,7 @@ Exercises the full pipeline documented in
 docs/user_guide/tutorials/train.md:
   1. Prepare data (pre-tokenized download or render-boundary tokenization)
   2. Launch a vLLM server for hidden-state extraction (scripts/launch_vllm.py)
-  3. Train a draft model against the live server (scripts/train.py)
+  3. Train a draft model against the live server (speculators train)
   4. Validate the trained checkpoint via vLLM inference (run_vllm_engine)
 """
 
@@ -107,6 +107,7 @@ def run_online_e2e(
             max_samples,
             seq_length,
             render_endpoint=f"http://localhost:{port}",
+            skip_token_freq=draft_vocab_size is None,
         )
 
         # Train against live vLLM server

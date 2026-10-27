@@ -1,4 +1,4 @@
-"""Training entrypoint — core logic moved from scripts/train.py."""
+"""Training implementation behind the ``speculators train`` command."""
 
 import argparse
 import gc
@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import transformers
 from packaging import version
 from transformers import LlamaConfig, PretrainedConfig
@@ -119,6 +120,15 @@ def create_transformer_layer_config(  # noqa: C901
     mrope_full_head_hack: bool = True,
     trust_remote_code: bool = False,
 ) -> PretrainedConfig:
+    """Build the draft decoder ``transformer_layer_config`` from shaping flags.
+
+    Used on the default draft-construction path (when neither ``--draft-config``
+    nor ``--from-pretrained`` is given). Attention defaults (``head_dim``,
+    ``num_key_value_heads``, ``hidden_size``) are seeded from the verifier. For
+    heterogeneous verifiers, global values are used as a reasonable automatic
+    default when Transformers reports an ambiguous per-layer attribute; users
+    can provide ``--draft-config`` for explicit values.
+    """
     if draft_arch not in DRAFT_ARCH_CONFIGS:
         raise ValueError(
             f"Unknown draft architecture: {draft_arch}. "
@@ -143,6 +153,20 @@ def create_transformer_layer_config(  # noqa: C901
     if hasattr(verifier_config, "text_config"):
         verifier_config = verifier_config.text_config
 
+    if getattr(verifier_config, "is_heterogeneous", False) and hasattr(
+        verifier_config, "allow_global_per_layer_attribute_access"
+    ):
+        verifier_config.allow_global_per_layer_attribute_access = True
+        warnings.warn(
+            f"Verifier '{verifier_name_or_path}' has heterogeneous per-layer "
+            "configuration; automatically using global verifier values to "
+            "infer the homogeneous draft config. This is a heuristic; pass "
+            "--draft-config with an explicit decoder config to control these "
+            "values.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     hidden_act = (
         hidden_act
         or getattr(verifier_config, "hidden_act", None)
@@ -157,16 +181,25 @@ def create_transformer_layer_config(  # noqa: C901
     head_dim = getattr(verifier_config, "head_dim", None)
     num_attention_heads = verifier_config.num_attention_heads
     num_key_value_heads = verifier_config.num_key_value_heads
+    resolved_hidden_size = verifier_config.hidden_size
 
     if (
         head_dim
-        and verifier_config.hidden_size % num_attention_heads != 0
-        and verifier_config.hidden_size % head_dim == 0
+        and resolved_hidden_size % num_attention_heads != 0
+        and resolved_hidden_size % head_dim == 0
     ):
-        num_attention_heads = verifier_config.hidden_size // head_dim
+        num_attention_heads = resolved_hidden_size // head_dim
         if num_attention_heads % num_key_value_heads != 0:
             num_key_value_heads = num_attention_heads
-    resolved_head_dim = head_dim or verifier_config.hidden_size // num_attention_heads
+    resolved_head_dim = head_dim or resolved_hidden_size // num_attention_heads
+
+    # Ensure global fallback values are GQA-consistent.
+    if num_key_value_heads and num_attention_heads % num_key_value_heads != 0:
+        raise ValueError(
+            "Inconsistent draft attention geometry resolved from verifier "
+            f"'{verifier_name_or_path}': num_attention_heads={num_attention_heads} "
+            f"is not divisible by num_key_value_heads={num_key_value_heads}."
+        )
 
     if full_attention_indices and (
         min(full_attention_indices) < 0 or max(full_attention_indices) >= num_layers
@@ -182,7 +215,7 @@ def create_transformer_layer_config(  # noqa: C901
 
     config = config_class(
         vocab_size=verifier_config.vocab_size,
-        hidden_size=verifier_config.hidden_size,
+        hidden_size=resolved_hidden_size,
         intermediate_size=resolve_draft_intermediate_size(verifier_config),
         num_hidden_layers=num_layers,
         num_attention_heads=num_attention_heads,
@@ -313,77 +346,102 @@ def _load_mappings(d2t_path, t2d_path, expected_draft_vocab_size: int | None):
     d2t = torch.from_numpy(np.load(d2t_path))
     t2d = torch.from_numpy(np.load(t2d_path))
     draft_vocab_size = d2t.shape[0]
-    if expected_draft_vocab_size and expected_draft_vocab_size != draft_vocab_size:
+    if (
+        expected_draft_vocab_size is not None
+        and expected_draft_vocab_size != draft_vocab_size
+    ):
         raise ValueError(
-            f"Explicit vocab mapping (t2d & d2t) files were provided, but don't"
-            f"match the provided --draft-vocab-size {draft_vocab_size}."
-            f"d2t.shape={d2t.shape}, dim 0 should match provided value."
+            f"Vocab mapping d2t has size {draft_vocab_size}, but "
+            f"--draft-vocab-size requires {expected_draft_vocab_size}."
         )
     return d2t, t2d, draft_vocab_size
 
 
-def parse_vocab_mappings(args: argparse.Namespace):
-    if args.d2t_path or args.t2d_path:
-        if not (args.d2t_path and args.t2d_path):
-            raise ValueError(
-                "Both t2d and d2t must be provided together, or both must be omitted. "
-                f"Got t2d={'provided' if args.t2d_path is not None else 'not provided'}"
-                f"d2t={'provided' if args.d2t_path is not None else 'not provided'}"
-            )
-
-        return _load_mappings(args.d2t_path, args.t2d_path, args.draft_vocab_size)
-
-    data_path = Path(args.data_path)
-    default_t2d_path = data_path / "t2d.npy"
-    default_d2t_path = data_path / "d2t.npy"
-
-    if default_t2d_path.exists() and default_d2t_path.exists():
-        return _load_mappings(default_d2t_path, default_t2d_path, args.draft_vocab_size)
-
+def _generate_vocab_mappings(args: argparse.Namespace, data_path: Path):
     token_freq_path = args.token_freq_path or data_path / "token_freq.pt"
     token_freq_path = Path(token_freq_path)
-    if token_freq_path.exists() and args.draft_vocab_size is not None:
-        logger.info("No vocab mappings provided. Regenerating from token frequencies")
-        token_freq_dict = torch.load(token_freq_path, weights_only=True)
+    if not token_freq_path.exists():
+        return None
 
-        target_vocab_size = get_target_vocab_size(
-            None,
-            args.verifier_name_or_path,
-            trust_remote_code=args.trust_remote_code,
-        )
+    logger.info("No vocab mappings provided. Regenerating from token frequencies")
+    token_freq_dict = torch.load(token_freq_path, weights_only=True)
 
-        d2t, t2d = build_vocab_mappings_from_distribution(
-            token_freq_dict=token_freq_dict,
-            draft_vocab_size=args.draft_vocab_size,
-            target_vocab_size=target_vocab_size,
-        )
-        draft_vocab_size = d2t.shape[0]
-        if args.draft_vocab_size and args.draft_vocab_size != draft_vocab_size:
-            raise ValueError(
-                f"Explicit vocab mapping (t2d & d2t) files were provided, but don't"
-                f"match the provided --draft-vocab-size {draft_vocab_size}."
-                f"d2t.shape={d2t.shape}, dim 0 should match provided value."
-            )
-
-        logger.info(f"Caching vocab mapping files to '{data_path}'")
-        np.save(data_path / "d2t.npy", d2t.cpu().numpy())
-        np.save(data_path / "t2d.npy", t2d.cpu().numpy())
-
-        return d2t, t2d, draft_vocab_size
-
-    logger.warning(
-        "No vocab mappings found, and can't generate new ones because either "
-        f"token_freq_path='{token_freq_path}' doesn't exist or --draft-vocab-size is "
-        "None. Using full verifier vocab"
-    )
-    # When vocab mapping is not provided, use the full verifier vocab
-    verifier_config = AutoConfig.from_pretrained(
+    target_vocab_size = get_target_vocab_size(
+        None,
         args.verifier_name_or_path,
         trust_remote_code=args.trust_remote_code,
     )
-    if hasattr(verifier_config, "text_config"):
-        verifier_config = verifier_config.text_config
-    return None, None, verifier_config.vocab_size
+
+    d2t, t2d = build_vocab_mappings_from_distribution(
+        token_freq_dict=token_freq_dict,
+        draft_vocab_size=args.draft_vocab_size,
+        target_vocab_size=target_vocab_size,
+    )
+    draft_vocab_size = d2t.shape[0]
+    if args.draft_vocab_size != draft_vocab_size:
+        raise ValueError(
+            f"Generated vocab mapping d2t has size {draft_vocab_size}, but "
+            f"--draft-vocab-size requires {args.draft_vocab_size}."
+        )
+
+    d2t_cache_path = data_path / f"d2t-{draft_vocab_size}.npy"
+    t2d_cache_path = data_path / f"t2d-{draft_vocab_size}.npy"
+    logger.info(
+        f"Caching vocab mapping files to '{d2t_cache_path}' and '{t2d_cache_path}'"
+    )
+    np.save(d2t_cache_path, d2t.cpu().numpy())
+    np.save(t2d_cache_path, t2d.cpu().numpy())
+
+    return d2t, t2d, draft_vocab_size
+
+
+def parse_vocab_mappings(args: argparse.Namespace):
+    if (args.d2t_path or args.t2d_path) and not (args.d2t_path and args.t2d_path):
+        raise ValueError(
+            "Both t2d and d2t must be provided together, or both must be omitted. "
+            f"Got t2d={'provided' if args.t2d_path is not None else 'not provided'}"
+            f"d2t={'provided' if args.d2t_path is not None else 'not provided'}"
+        )
+
+    result = None
+    if not is_distributed() or get_rank() == 0:
+        if args.d2t_path or args.t2d_path:
+            result = _load_mappings(args.d2t_path, args.t2d_path, args.draft_vocab_size)
+        else:
+            data_path = Path(args.data_path)
+            if args.draft_vocab_size is not None:
+                default_t2d_path = data_path / f"t2d-{args.draft_vocab_size}.npy"
+                default_d2t_path = data_path / f"d2t-{args.draft_vocab_size}.npy"
+                if default_t2d_path.exists() and default_d2t_path.exists():
+                    result = _load_mappings(
+                        default_d2t_path, default_t2d_path, args.draft_vocab_size
+                    )
+                else:
+                    result = _generate_vocab_mappings(args, data_path)
+
+            if result is None:
+                token_freq_path = args.token_freq_path or data_path / "token_freq.pt"
+                token_freq_path = Path(token_freq_path)
+
+                logger.warning(
+                    "No vocab mappings found, and can't generate new ones because "
+                    f"either token_freq_path='{token_freq_path}' doesn't exist or "
+                    "--draft-vocab-size is None. Using full verifier vocab"
+                )
+                # When vocab mapping is not provided, use the full verifier vocab
+                verifier_config = AutoConfig.from_pretrained(
+                    args.verifier_name_or_path,
+                    trust_remote_code=args.trust_remote_code,
+                )
+                if hasattr(verifier_config, "text_config"):
+                    verifier_config = verifier_config.text_config
+                result = None, None, verifier_config.vocab_size
+
+    if is_distributed():
+        payload = [result]
+        dist.broadcast_object_list(payload, src=0)
+        result = payload[0]
+    return result
 
 
 def _build_from_config_only(
@@ -661,11 +719,9 @@ def main(cfg: TrainConfig):  # noqa: C901
         data_path=args.data_path,
         total_seq_len=args.total_seq_len,
         hidden_states_dtype=hidden_states_dtype,
-        noise_std=args.noise_std,
         transfer=transfer,
         vllm_endpoint=args.vllm_endpoint,
         on_missing=args.on_missing,
-        on_generate=args.on_generate,
         verifier_name_or_path=args.verifier_name_or_path,
         request_timeout=args.request_timeout,
         max_retries=args.max_retries,
@@ -680,6 +736,7 @@ def main(cfg: TrainConfig):  # noqa: C901
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
         max_sample_seq_len=args.max_sample_seq_len,
+        seed=args.packing_seed if args.packing_seed is not None else args.seed,
     )
 
     # Get trainer kwargs from model class
@@ -711,6 +768,7 @@ def main(cfg: TrainConfig):  # noqa: C901
         fsdp_shard=args.fsdp_shard,
         fsdp_sharding_strategy=args.fsdp_sharding_strategy,
         fsdp_reshard_after_forward=args.fsdp_reshard_after_forward,
+        gradient_checkpointing=args.gradient_checkpointing,
         max_steps=args.max_steps,
     )
     trainer = Trainer(draft_model, trainer_config, train_loader, val_loader)
