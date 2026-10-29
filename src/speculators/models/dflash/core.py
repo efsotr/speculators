@@ -216,6 +216,70 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         return (pad(hidden_states), pad(input_ids), pad(loss_mask),
                 pad(verifier_last_hidden_states), pad(document_ids, -1), pad(position_ids))
 
+    @torch.compiler.disable
+    def prepare_training_inputs(
+        self, hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+        document_ids, position_ids=None, max_anchors=None, **kwargs,
+    ):
+        """Prepare padding, anchor selection and BlockMask before model forward.
+
+        Call under the same autocast context as forward. The returned dictionary
+        is passed to the wrapped DDP/FSDP model, keeping preprocessing outside
+        both the compiled forward and distributed forward hooks.
+        """
+        if max_anchors is None:
+            import inspect
+            original = getattr(type(self).forward, "_torchdynamo_orig_callable", type(self).forward)
+            max_anchors = inspect.signature(original).parameters["max_anchors"].default
+        anchor_seq_len = hidden_states.shape[1]
+        (hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+         document_ids, position_ids) = self._pad_target_inputs(
+            hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+            document_ids, position_ids,
+        )
+        if position_ids is None:
+            position_ids = torch.arange(
+                hidden_states.shape[1], dtype=torch.long, device=hidden_states.device
+            ).unsqueeze(0)
+        sampling = kwargs.pop("anchor_sampling", None)
+        epoch = kwargs.pop("anchor_sampling_epoch", 0)
+        epochs = kwargs.pop("anchor_sampling_num_epochs", 1)
+        step = kwargs.pop("anchor_sampling_step", 0)
+        rank = kwargs.pop("anchor_sampling_rank", 0)
+        selected = kwargs.pop("_selected_anchors", None)
+        self._anchor_sampling_metrics = {}
+        if selected is None and sampling is not None:
+            # Frozen verifier weights still belong to the root FSDP group.
+            # Nonuniform scoring runs before root forward hooks, so gather them
+            # explicitly. Occupancy decoder calls retain their own FSDP hooks.
+            from torch.distributed.fsdp import FSDPModule
+            gather_for_sampling = (
+                sampling.get("strategy", "uniform") != "uniform"
+                and isinstance(self, FSDPModule)
+            )
+            if gather_for_sampling:
+                self.unshard()
+            try:
+                selected = self._sample_training_anchors(
+                    hidden_states[:, :anchor_seq_len], input_ids[:, :anchor_seq_len],
+                    loss_mask[:, :anchor_seq_len], verifier_last_hidden_states[:, :anchor_seq_len],
+                    document_ids[:, :anchor_seq_len], position_ids[:, :anchor_seq_len],
+                    max_anchors, sampling, epoch, epochs, step, rank,
+                )
+            finally:
+                if gather_for_sampling:
+                    self.reshard()
+        prepared_mask = self._build_attention_mask(
+            loss_mask, max_anchors, document_ids, hidden_states.device,
+            selected_anchors=selected, anchor_seq_len=anchor_seq_len,
+        )
+        return dict(
+            hidden_states=hidden_states, input_ids=input_ids, loss_mask=loss_mask,
+            verifier_last_hidden_states=verifier_last_hidden_states,
+            document_ids=document_ids, position_ids=position_ids,
+            max_anchors=max_anchors, _prepared_attention_mask=prepared_mask, **kwargs,
+        )
+
     @property
     def target_layer_ids(self) -> list[int]:
         """Target layer IDs for auxiliary hidden states."""
@@ -496,7 +560,11 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                 _, logits, _, _, _ = self._backbone_forward(
                     scan_hidden, scan_ids, scan_mask, scan_last, scan_docs,
                     scan_positions, max_anchors=positions.numel(),
-                    _selected_anchors=(positions, torch.ones_like(positions, dtype=torch.bool)),
+                    _prepared_attention_mask=self._build_attention_mask(
+                        scan_mask, positions.numel(), scan_docs, device,
+                        selected_anchors=(positions, torch.ones_like(positions, dtype=torch.bool)),
+                        anchor_seq_len=scan_hidden.shape[1],
+                    ),
                     _anchor_scan=True,
                 )
                 return logits.reshape(-1, self.block_size, logits.shape[-1])
@@ -561,36 +629,13 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         """
         device = hidden_states.device
         total_seq_len = hidden_states.shape[1]
-        anchor_seq_len = kwargs.pop("_anchor_seq_len", total_seq_len)
         num_anchors = kwargs.pop("max_anchors", 512)
-        selected_anchors = kwargs.pop("_selected_anchors", None)
         anchor_scan = kwargs.pop("_anchor_scan", False)
-        sampling = kwargs.pop("anchor_sampling", None)
-        sampling_epoch = kwargs.pop("anchor_sampling_epoch", 0)
-        sampling_epochs = kwargs.pop("anchor_sampling_num_epochs", 1)
-        sampling_step = kwargs.pop("anchor_sampling_step", 0)
-        sampling_rank = kwargs.pop("anchor_sampling_rank", 0)
-        if sampling is None and not anchor_scan:
-            self._anchor_sampling_metrics = {}
-
-        if position_ids is None:
-            position_ids = torch.arange(
-                total_seq_len, dtype=torch.long, device=device
-            ).unsqueeze(0)
-
-        if selected_anchors is None and sampling is not None:
-            selected_anchors = self._sample_training_anchors(
-                hidden_states[:, :anchor_seq_len], input_ids[:, :anchor_seq_len],
-                loss_mask[:, :anchor_seq_len], verifier_last_hidden_states[:, :anchor_seq_len],
-                document_ids[:, :anchor_seq_len], position_ids[:, :anchor_seq_len],
-                num_anchors, sampling, sampling_epoch,
-                sampling_epochs, sampling_step, sampling_rank,
-            )
-        full_attn_mask, sliding_window_attn_mask, anchor_positions, anchor_valid = (
-            self._build_attention_mask(loss_mask, num_anchors, document_ids, device,
-                                       selected_anchors=selected_anchors,
-                                       anchor_seq_len=anchor_seq_len)
-        )
+        prepared_mask = kwargs.pop("_prepared_attention_mask", None)
+        if prepared_mask is None:
+            raise ValueError("Call prepare_training_inputs before the DFlash-family forward")
+        (full_attn_mask, sliding_window_attn_mask,
+         anchor_positions, anchor_valid) = prepared_mask
 
         mask_tokens_size = num_anchors * self.block_size
 
@@ -692,12 +737,6 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         dpace_alpha: float = 0.5,
         **kwargs,
     ):
-        anchor_seq_len = hidden_states.shape[1]
-        (hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
-         document_ids, position_ids) = self._pad_target_inputs(
-            hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
-            document_ids, position_ids,
-        )
         _, logits, targets, aligned_loss_mask, _ = self._backbone_forward(
             hidden_states,
             input_ids,
@@ -706,7 +745,6 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             document_ids,
             position_ids,
             max_anchors=max_anchors,
-            _anchor_seq_len=anchor_seq_len,
             **kwargs,
         )
         loss, metrics = compute_metrics(

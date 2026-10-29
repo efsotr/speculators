@@ -51,10 +51,10 @@ def _batch(length=20):
 def _run(model, batch, policy, **overrides):
     train_kwargs, _ = model.get_trainer_kwargs(
         loss_fn="ce", loss_implementation="eager", max_anchors=3,
-        anchor_sampling=policy,
+        anchor_sampling={"score_backend": "eager", **policy},
     )
     train_kwargs.update(overrides)
-    return model(**batch, **train_kwargs)
+    return model(**model.prepare_training_inputs(**batch, **train_kwargs))
 
 
 @pytest.mark.parametrize("model_type", ["dflash", "dflash2"])
@@ -126,7 +126,7 @@ def test_target_scorer_uses_hidden_at_anchor_not_adjacent_hidden(sample):
         anchors, valid = model._sample_training_anchors(
             batch["hidden_states"], batch["input_ids"], batch["loss_mask"],
             batch["verifier_last_hidden_states"], batch["document_ids"], None,
-            1, {"strategy": "target_entropy_high"}, 0, 1, 0, 0,
+            1, {"strategy": "target_entropy_high", "score_backend": "eager"}, 0, 1, 0, 0,
         )
     finally:
         hook.remove()
@@ -138,7 +138,7 @@ def test_target_scorer_uses_hidden_at_anchor_not_adjacent_hidden(sample):
 def test_resume_sampling_is_determined_by_step_epoch_rank_and_seed():
     model = _model()
     batch = _batch(64)
-    policy = {"strategy": "target_flatness", "retain_fraction": 0.8, "seed": 7}
+    policy = {"strategy": "target_flatness", "retain_fraction": 0.8, "seed": 7, "score_backend": "eager"}
 
     def select(model, epoch, step, rank):
         return model._sample_training_anchors(
@@ -201,3 +201,34 @@ def test_occupancy_runs_real_drafter_scan_and_reports_only_selected_blocks(monke
     assert metrics["anchor_selected_total"].item() == 1
     assert metrics["anchor_score_seconds_total"].item() == 1
     assert metrics["anchor_inclusion_total"].item() == 2
+
+
+@pytest.mark.parametrize("strategy", ["uniform", "target_flatness"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_external_fsdp_sampling_gathers_root_and_always_reshards(monkeypatch, strategy, fail):
+    """Model the public FSDP lifecycle without initializing CUDA/process groups."""
+    from torch.distributed.fsdp import FSDPModule
+
+    model = _model()
+    model.__class__ = type("MockFSDPDFlash", (FSDPModule, type(model)), {})
+    calls = []
+    monkeypatch.setattr(model, "unshard", lambda: calls.append("unshard"))
+    monkeypatch.setattr(model, "reshard", lambda: calls.append("reshard"))
+
+    def sample(*args):
+        calls.append("sample")
+        if fail:
+            raise RuntimeError("sampling failure")
+        return torch.tensor([0]), torch.tensor([True])
+
+    monkeypatch.setattr(model, "_sample_training_anchors", sample)
+    monkeypatch.setattr(model, "_build_attention_mask", lambda *args, **kwargs: (None,) * 4)
+    if fail:
+        with pytest.raises(RuntimeError, match="sampling failure"):
+            model.prepare_training_inputs(**_batch(), max_anchors=1,
+                                          anchor_sampling={"strategy": strategy})
+    else:
+        model.prepare_training_inputs(**_batch(), max_anchors=1,
+                                      anchor_sampling={"strategy": strategy})
+    assert calls == (["sample"] if strategy == "uniform"
+                     else ["unshard", "sample", "reshard"])

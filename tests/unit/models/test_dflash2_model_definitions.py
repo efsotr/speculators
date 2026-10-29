@@ -545,12 +545,10 @@ def test_tiny_gpu_forward_backward_reaches_all_new_parameters():
     eager_kl = resolve_loss_config("kl_div", "eager")
     eager_tv = resolve_loss_config("tv", "eager")["tv"][0]
 
-    _, loss, _ = model(  # type: ignore[call-arg]
-        **inputs,
-        max_anchors=4,
-        loss_config=eager_kl,
-        tv_loss_fn=eager_tv,
+    prepared = model.prepare_training_inputs(
+        **inputs, max_anchors=4, loss_config=eager_kl, tv_loss_fn=eager_tv,
     )
+    _, loss, _ = model(**prepared)
     assert torch.isfinite(loss)
     loss.backward()
 

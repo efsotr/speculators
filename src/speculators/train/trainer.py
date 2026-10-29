@@ -585,9 +585,16 @@ class Trainer:
                         anchor_sampling_step=self.global_step,
                         anchor_sampling_rank=self.rank,
                     )
-                _draft_tokens, loss, metrics = self.model(
-                    **gpu_batch, **call_kwargs
+                input_model = (
+                    self.model.module
+                    if isinstance(self.model, DistributedDataParallel) else self.model
                 )
+                prepare = getattr(input_model, "prepare_training_inputs", None)
+                model_inputs = (
+                    prepare(**gpu_batch, **call_kwargs) if prepare is not None
+                    else dict(gpu_batch, **call_kwargs)
+                )
+                _draft_tokens, loss, metrics = self.model(**model_inputs)
 
             timer.mark("fwd")
             self._optimizers_zero_grad()
@@ -709,9 +716,16 @@ class Trainer:
                         anchor_sampling_step=i,
                         anchor_sampling_rank=self.rank,
                     )
-                _draft_tokens, _loss, metrics = self.model(
-                    **gpu_batch, **call_kwargs
+                input_model = (
+                    self.model.module
+                    if isinstance(self.model, DistributedDataParallel) else self.model
                 )
+                prepare = getattr(input_model, "prepare_training_inputs", None)
+                model_inputs = (
+                    prepare(**gpu_batch, **call_kwargs) if prepare is not None
+                    else dict(gpu_batch, **call_kwargs)
+                )
+                _draft_tokens, _loss, metrics = self.model(**model_inputs)
 
             for k, v in metrics.items():
                 acc = accumulated.get(k)

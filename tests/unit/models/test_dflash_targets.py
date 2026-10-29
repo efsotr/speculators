@@ -44,14 +44,12 @@ def test_targets_match_full_sequence_roll(sample_from_anchor, max_anchors):
     document_ids = torch.zeros(1, seq_len, dtype=torch.long)
 
     with torch.no_grad():
-        _, _, targets, _, anchored_block_indices = model._backbone_forward(
-            hidden_states,
-            input_ids,
-            loss_mask,
-            verifier_last_hidden_states,
-            document_ids,
-            max_anchors=max_anchors,
+        prepared = model.prepare_training_inputs(
+            hidden_states=hidden_states, input_ids=input_ids, loss_mask=loss_mask,
+            verifier_last_hidden_states=verifier_last_hidden_states,
+            document_ids=document_ids, max_anchors=max_anchors,
         )
+        _, _, targets, _, anchored_block_indices = model._backbone_forward(**prepared)
 
         full_logits = model.verifier_lm_head(
             model.verifier_norm(verifier_last_hidden_states)
