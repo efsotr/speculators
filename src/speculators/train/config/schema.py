@@ -565,17 +565,17 @@ class TrainerArgs(_Group):
 
 class LoggingArgs(_Group):
     torch_logs: str = Field(
-        default="graph_breaks,recompiles,output_code",
+        default="graph_breaks,recompiles,graph_code",
         description="PyTorch TORCH_LOGS settings; TORCH_LOGS env takes precedence.",
     )
     torch_logs_format: str = Field(
         default="%(artifactprefix)s %(message)s",
         description="PyTorch text log format; TORCH_LOGS_FORMAT env takes precedence.",
     )
-    torch_output_code_dir: str | None = Field(
+    torch_graph_code_dir: str | None = Field(
         default=None,
-        description="Separate output_code files rank{RANK}_torch_compiled_code.txt; default: "
-        "<log_dir>/torch_output_code. Generated code is excluded from run logs.",
+        description="Separate graph_code files rank{RANK}_torch_graph_code.txt; default: "
+        "<log_dir>/torch_graph_code. FX graph code is excluded from run logs.",
     )
     logger: str = Field(
         default="",

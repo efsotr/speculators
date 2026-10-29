@@ -1,4 +1,4 @@
-"""Configure compiler diagnostics and keep generated code out of run logs."""
+"""Configure compiler diagnostics and keep FX graph code out of run logs."""
 
 import logging
 import os
@@ -19,12 +19,12 @@ class _ArtifactFormatter(logging.Formatter):
 
 
 class _CodeFilter(logging.Filter):
-    def __init__(self, code_only: bool):
+    def __init__(self, graph_code_only: bool):
         super().__init__()
-        self.code_only = code_only
+        self.graph_code_only = graph_code_only
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return (_artifact(record) == "output_code") == self.code_only
+        return (_artifact(record) == "graph_code") == self.graph_code_only
 
 
 def setup_torch_logging(cfg) -> Path:
@@ -37,15 +37,15 @@ def setup_torch_logging(cfg) -> Path:
     settings = os.environ.get("TORCH_LOGS", cfg.torch_logs)
     fmt = os.environ.get("TORCH_LOGS_FORMAT", cfg.torch_logs_format)
     formatter = _ArtifactFormatter(fmt)
-    destination = Path(cfg.torch_output_code_dir or Path(cfg.log_dir) / "torch_output_code")
+    destination = Path(cfg.torch_graph_code_dir or Path(cfg.log_dir) / "torch_graph_code")
     destination.mkdir(parents=True, exist_ok=True)
-    code_path = destination / f"rank{os.environ.get('RANK', '0')}_torch_compiled_code.txt"
+    code_path = destination / f"rank{os.environ.get('RANK', '0')}_torch_graph_code.txt"
 
     # Remove only our previous file handlers on repeated setup.
     for name in torch_logging.log_registry.get_log_qnames():
         logger = logging.getLogger(name)
         for handler in list(logger.handlers):
-            if getattr(handler, "_speculators_output_code", False):
+            if getattr(handler, "_speculators_graph_code", False):
                 logger.removeHandler(handler)
                 handler.close()
 
@@ -60,16 +60,16 @@ def setup_torch_logging(cfg) -> Path:
         else:
             os.environ["TORCH_LOGS"] = previous
     code_handler = logging.FileHandler(code_path)
-    code_handler._speculators_output_code = True
+    code_handler._speculators_graph_code = True
     code_handler.setLevel(logging.DEBUG)
     code_handler.setFormatter(formatter)
-    code_handler.addFilter(_CodeFilter(code_only=True))
+    code_handler.addFilter(_CodeFilter(graph_code_only=True))
     for name in torch_logging.log_registry.get_log_qnames():
         logger = logging.getLogger(name)
         for handler in logger.handlers:
             handler.setFormatter(formatter)
-            handler.addFilter(_CodeFilter(code_only=False))
+            handler.addFilter(_CodeFilter(graph_code_only=False))
         # Registered torch loggers do not propagate to each other. Attaching at
-        # each boundary also catches output_code artifacts instantiated later.
+        # each boundary also catches graph_code artifacts instantiated later.
         logger.addHandler(code_handler)
     return code_path

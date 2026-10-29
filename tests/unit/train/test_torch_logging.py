@@ -1,4 +1,4 @@
-"""Focused checks for compiler diagnostics formatting and output-code routing."""
+"""Focused checks for compiler diagnostics formatting and graph-code routing."""
 
 import os
 import subprocess
@@ -11,27 +11,27 @@ from speculators.train.config.resolution import resolve
 
 def test_torch_logging_config_defaults_and_native_overrides(tmp_path):
     defaults = TrainConfig().logging
-    assert defaults.torch_logs == "graph_breaks,recompiles,output_code"
+    assert defaults.torch_logs == "graph_breaks,recompiles,graph_code"
     assert defaults.torch_logs_format == "%(artifactprefix)s %(message)s"
-    assert defaults.torch_output_code_dir is None
+    assert defaults.torch_graph_code_dir is None
     config = tmp_path / "config.yaml"
     config.write_text(
         "verifier:\n  verifier_name_or_path: test-model\n"
-        "logging:\n  torch_logs: graph_breaks,output_code\n"
+        "logging:\n  torch_logs: graph_breaks,graph_code\n"
         "  torch_logs_format: '%(message)s'\n"
-        "  torch_output_code_dir: generated\n"
+        "  torch_graph_code_dir: generated\n"
     )
     cfg = resolve(
-        TrainConfig, ["--config", str(config), "--torch-logs", "recompiles,output_code"]
+        TrainConfig, ["--config", str(config), "--torch-logs", "recompiles,graph_code"]
     )
-    assert cfg.logging.torch_logs == "recompiles,output_code"
+    assert cfg.logging.torch_logs == "recompiles,graph_code"
     assert cfg.logging.torch_logs_format == "%(message)s"
-    assert str(cfg.logging.torch_output_code_dir) == "generated"
-    assert cfg.flatten()["torch_logs"] == "recompiles,output_code"
+    assert str(cfg.logging.torch_graph_code_dir) == "generated"
+    assert cfg.flatten()["torch_logs"] == "recompiles,graph_code"
 
 
 def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
-    """Exercise real graph breaks, recompiles and generated CPU Inductor code."""
+    """Exercise real graph breaks, recompiles and captured FX graph code."""
     script = textwrap.dedent(
         """
         import argparse
@@ -42,9 +42,9 @@ def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
         from speculators.train.torch_logging import setup_torch_logging
 
         root = Path(os.environ['TEST_TORCH_LOG_ROOT'])
-        cfg = argparse.Namespace(torch_logs='graph_breaks,recompiles,output_code',
+        cfg = argparse.Namespace(torch_logs='graph_breaks,recompiles,graph_code',
             torch_logs_format='%(artifactprefix)s %(message)s',
-            torch_output_code_dir=None, log_dir=str(root))
+            torch_graph_code_dir=None, log_dir=str(root))
         setup_torch_logging(cfg)
         assert 'TORCH_LOGS' not in os.environ
         torch._logging.getArtifactLogger('torch._dynamo', 'graph_breaks').debug('FORMAT_SENTINEL')
@@ -56,7 +56,7 @@ def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
         compiled = torch.compile(broken, backend='eager', dynamic=False)
         assert torch.equal(compiled(torch.ones(2)), torch.full((2,), 4.))
         assert torch.equal(compiled(torch.ones(3)), torch.full((3,), 4.))
-        native = torch.compile(lambda x: x.sin() + 1, backend='inductor', fullgraph=True)
+        native = torch.compile(lambda x: x.sin() + 1, backend='eager', fullgraph=True)
         x = torch.arange(8, dtype=torch.float)
         torch.testing.assert_close(native(x), x.sin() + 1)
         torch._logging.getArtifactLogger('torch._dynamo', 'graph_breaks').debug('MULTILINE_FIRST\\nMULTILINE_SECOND')
@@ -96,11 +96,11 @@ def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
     assert "[__graph_breaks] MULTILINE_FIRST\nMULTILINE_SECOND" in console
     assert "[__recompiles]" in console
     assert "Graph break" in console
-    assert "def call(" not in console
-    assert "[__output_code]" not in console
-    output = (tmp_path / "torch_output_code" / "rank3_torch_compiled_code.txt").read_text()
-    assert "def call(" in output
+    assert "def forward(" not in console
+    assert "[__graph_code]" not in console
+    output = (tmp_path / "torch_graph_code" / "rank3_torch_graph_code.txt").read_text()
+    assert "def forward(" in output
     combined = (tmp_path / "combined.log").read_text()
     assert "FORMAT_SENTINEL" in combined
-    assert "[__output_code]" not in combined
-    assert "def call(" not in combined
+    assert "[__graph_code]" not in combined
+    assert "def forward(" not in combined
