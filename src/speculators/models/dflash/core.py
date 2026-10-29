@@ -17,6 +17,7 @@ from speculators.models.attention import create_float_mask
 from speculators.models.dflash import DFlashSpeculatorConfig
 from speculators.models.dflash.attention import create_anchor_block_mask_mod
 from speculators.models.dflash.metrics import compute_metrics
+from speculators.models.dflash.stable_block_mask import StableBlockMasks
 from speculators.models.dflash.model_definitions import Qwen3DFlashDecoderLayer
 from speculators.models.dflash.utils import (
     get_base_indices_for_anchored_blocks,
@@ -182,6 +183,11 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         partition_config.activation_memory_budget = activation_memory_budget
         inductor_config.emulate_precision_casts = emulate_precision_casts
         self._pad_target_seq_len = target_seq_len if pad_target_hidden_states else None
+        self._stable_block_masks = (
+            StableBlockMasks()
+            if mode == "max-autotune" and self._attn_impl == "simple_flex_attention"
+            else None
+        )
         original = getattr(type(self).forward, "_torchdynamo_orig_callable", type(self).forward)
         bound_forward = original.__get__(self, type(self))
         if mode == "max-autotune":
@@ -238,7 +244,9 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
 
         Call under the same autocast context as forward. The returned dictionary
         is passed to the wrapped DDP/FSDP model, keeping preprocessing outside
-        both the compiled forward and distributed forward hooks.
+        both the compiled forward and distributed forward hooks. In max-autotune
+        mode, sparse indices reuse storage: finish the preceding backward before
+        preparing the next batch; overlapping prepared batches are unsupported.
         """
         if max_anchors is None:
             import inspect
@@ -286,6 +294,9 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             loss_mask, max_anchors, document_ids, hidden_states.device,
             selected_anchors=selected, anchor_seq_len=anchor_seq_len,
         )
+        stable_masks = getattr(self, "_stable_block_masks", None)
+        if stable_masks is not None:
+            prepared_mask = stable_masks.update(prepared_mask)
         return dict(
             hidden_states=hidden_states, input_ids=input_ids, loss_mask=loss_mask,
             verifier_last_hidden_states=verifier_last_hidden_states,
