@@ -168,7 +168,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         emulate_precision_casts=False, pad_target_hidden_states=False,
         target_seq_len=8192,
     ):
-        """Configure native forward before DDP/FSDP wrapping or its first call."""
+        """Configure whole-forward/default or per-layer/max-autotune compilation."""
         if mode not in {"default", "max-autotune"}:
             raise ValueError(f"Unsupported draft compile mode: {mode}")
         if not 0 <= activation_memory_budget <= 1:
@@ -184,10 +184,23 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         self._pad_target_seq_len = target_seq_len if pad_target_hidden_states else None
         original = getattr(type(self).forward, "_torchdynamo_orig_callable", type(self).forward)
         bound_forward = original.__get__(self, type(self))
-        self.forward = (
-            torch.compile(bound_forward, mode=mode)
-            if torch.cuda.is_available() else bound_forward
-        )
+        if mode == "max-autotune":
+            # Keep the backbone loop and Module.__call__ (including FSDP hooks)
+            # eager. Compile each layer's forward body inside that boundary.
+            self.forward = bound_forward
+            for layer in self.layers:
+                layer_forward = getattr(
+                    type(layer).forward, "_torchdynamo_orig_callable", type(layer).forward
+                ).__get__(layer, type(layer))
+                layer.forward = (
+                    torch.compile(layer_forward, mode=mode)
+                    if torch.cuda.is_available() else layer_forward
+                )
+        else:
+            self.forward = (
+                torch.compile(bound_forward, mode=mode)
+                if torch.cuda.is_available() else bound_forward
+            )
 
     def _pad_target_inputs(
         self, hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
