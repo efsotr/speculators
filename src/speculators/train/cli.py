@@ -39,6 +39,7 @@ from speculators.train.logger import (
     setup_metric_logger,
     setup_root_logger,
 )
+from speculators.train.torch_logging import setup_torch_logging
 from speculators.train.trainer import Trainer, TrainerConfig
 from speculators.train.utils import resolve_mask_token_id
 from speculators.train.vocab_mapping import (
@@ -607,6 +608,8 @@ def main(cfg: TrainConfig):  # noqa: C901
     setup_metric_logger(
         loggers=args.logger, run_name=args.run_name, output_dir=args.log_dir
     )
+
+    setup_torch_logging(args)
 
     # Setup distributed training
     maybe_setup_distributed()
