@@ -85,12 +85,16 @@ def compute_accuracy_multi_step(
         Overall counts can be derived by summing these.
     """
     correct = pred_ids == target_ids
-    correct = torch.masked_select(correct, loss_mask.to(torch.bool))
-    pos_idx = torch.masked_select(pos_idx, loss_mask.to(torch.bool))
+    # Keep the input shape fixed: masked_select has a data-dependent output
+    # length and breaks torch.compile graphs. Masked positions contribute zero;
+    # remap their indices as callers may use out-of-range padding sentinels.
+    valid = loss_mask.to(torch.bool)
+    pos_idx = torch.where(valid, pos_idx, 0).reshape(-1)
+    correct = torch.logical_and(correct, valid).reshape(-1)
 
     correct_per_pos = torch.zeros(num_pos, dtype=torch.float, device=correct.device)
     total_per_pos = torch.zeros(num_pos, dtype=torch.float, device=correct.device)
     correct_per_pos.scatter_add_(0, pos_idx, correct.float())
-    total_per_pos.scatter_add_(0, pos_idx, torch.ones_like(correct, dtype=torch.float))
+    total_per_pos.scatter_add_(0, pos_idx, valid.reshape(-1).float())
 
     return correct_per_pos, total_per_pos  # shape: [num_pos], [num_pos]

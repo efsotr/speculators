@@ -21,7 +21,10 @@ from speculators.losses.eager import (
     reverse_kl_div_loss,
     tv_loss,
 )
-from speculators.models.metrics import compute_accuracy_single_step
+from speculators.models.metrics import (
+    compute_accuracy_multi_step,
+    compute_accuracy_single_step,
+)
 
 
 @pytest.mark.parametrize(
@@ -437,3 +440,33 @@ class TestBf16GradientPrecision:
 
         rel_err = ((actual - exact).norm() / exact.norm()).item()
         assert rel_err < 0.02, f"{loss_fn.__name__} bf16 gradient error {rel_err:.1%}"
+
+
+@pytest.mark.parametrize("backend", ["eager", "inductor"])
+@torch._dynamo.config.patch(capture_dynamic_output_shape_ops=False)
+def test_multi_step_fullgraph_preserves_masked_counts(backend):
+    """Changing valid counts must preserve one full graph and ignore sentinels."""
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    counter = CompileCounterWithBackend(backend)
+    compiled = torch.compile(compute_accuracy_multi_step, backend=counter, fullgraph=True)
+    pred = torch.tensor([[1, 2, 3, 0, 1, 0, 2, 3]])
+    target = torch.tensor([[1, 0, 3, 0, 0, 0, 2, 0]])
+    positions = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
+    for mask in (
+        torch.ones_like(pred, dtype=torch.float),
+        torch.tensor([[1.0, 0.0, 2.0, 0.0, -1.0, 1.0, 0.0, 1.0]]),
+        torch.zeros_like(pred, dtype=torch.float),
+    ):
+        valid = mask.bool()
+        padded_positions = torch.where(valid, positions, -99)
+        actual = compiled(pred, target, mask, padded_positions, 4)
+        expected = tuple(
+            torch.stack(
+                [(values & valid & (positions == i)).float().sum() for i in range(4)]
+            )
+            for values in (pred == target, torch.ones_like(valid))
+        )
+        for result, reference in zip(actual, expected, strict=True):
+            torch.testing.assert_close(result, reference)
+    assert counter.frame_count == 1
