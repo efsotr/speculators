@@ -461,12 +461,15 @@ def test_multi_step_fullgraph_preserves_masked_counts(backend):
         valid = mask.bool()
         padded_positions = torch.where(valid, positions, -99)
         actual = compiled(pred, target, mask, padded_positions, 4)
-        expected = tuple(
-            torch.stack(
-                [(values & valid & (positions == i)).float().sum() for i in range(4)]
-            )
-            for values in (pred == target, torch.ones_like(valid))
-        )
+        # Exact pre-fix masked_select implementation, including real position 0.
+        old_correct = torch.masked_select(pred == target, valid)
+        old_positions = torch.masked_select(padded_positions, valid)
+        expected = (torch.zeros(4), torch.zeros(4))
+        expected[0].scatter_add_(0, old_positions, old_correct.float())
+        expected[1].scatter_add_(0, old_positions, torch.ones_like(old_correct).float())
+        eager = compute_accuracy_multi_step(pred, target, mask, padded_positions, 4)
+        for result, reference in zip(eager, expected, strict=True):
+            torch.testing.assert_close(result, reference, rtol=0, atol=0)
         for result, reference in zip(actual, expected, strict=True):
-            torch.testing.assert_close(result, reference)
+            torch.testing.assert_close(result, reference, rtol=0, atol=0)
     assert counter.frame_count == 1
