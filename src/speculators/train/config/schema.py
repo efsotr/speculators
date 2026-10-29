@@ -574,7 +574,7 @@ class LoggingArgs(_Group):
     )
     torch_output_code_dir: str | None = Field(
         default=None,
-        description="Separate output_code files rank{RANK}.txt; default: "
+        description="Separate output_code files rank{RANK}_torch_compiled_code.txt; default: "
         "<log_dir>/torch_output_code. Generated code is excluded from run logs.",
     )
     logger: str = Field(

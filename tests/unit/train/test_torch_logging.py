@@ -98,7 +98,7 @@ def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
     assert "Graph break" in console
     assert "def call(" not in console
     assert "[__output_code]" not in console
-    output = (tmp_path / "torch_output_code" / "rank3.txt").read_text()
+    output = (tmp_path / "torch_output_code" / "rank3_torch_compiled_code.txt").read_text()
     assert "def call(" in output
     combined = (tmp_path / "combined.log").read_text()
     assert "FORMAT_SENTINEL" in combined

@@ -39,7 +39,7 @@ def setup_torch_logging(cfg) -> Path:
     formatter = _ArtifactFormatter(fmt)
     destination = Path(cfg.torch_output_code_dir or Path(cfg.log_dir) / "torch_output_code")
     destination.mkdir(parents=True, exist_ok=True)
-    code_path = destination / f"rank{os.environ.get('RANK', '0')}.txt"
+    code_path = destination / f"rank{os.environ.get('RANK', '0')}_torch_compiled_code.txt"
 
     # Remove only our previous file handlers on repeated setup.
     for name in torch_logging.log_registry.get_log_qnames():
