@@ -248,6 +248,11 @@ class AnchorSamplingConfig(BaseModel):
 
 
 class DataArgs(_Group):
+    pad_target_hidden_states: bool = Field(
+        default=False,
+        description="Pad DFlash-family base hidden states, token/position/document ids "
+        "and loss mask to total_seq_len before anchor selection and FlexAttention.",
+    )
     data_path: str = Field(
         default="./output",
         description="Root data directory with the preprocessed dataset, size-keyed "
@@ -480,6 +485,22 @@ class SchedulerArgs(_Group):
 
 
 class TrainerArgs(_Group):
+    ddp_compile_optimizer: bool = Field(
+        default=True,
+        description="Enable Dynamo DDP bucket graph partitioning for communication/compute "
+        "overlap. False retains native DDP but bypasses this compiler optimization.",
+    )
+    draft_compile_mode: Literal["default", "max-autotune"] = Field(
+        default="default", description="DFlash-family forward torch.compile mode."
+    )
+    activation_memory_budget: float = Field(
+        default=0.99, ge=0.0, le=1.0,
+        description="DFlash-family torch._functorch activation partitioner memory budget (0–1).",
+    )
+    emulate_precision_casts: bool = Field(
+        default=False, description="Preserve eager low-precision rounding for DFlash-family "
+        "draft compilation and the online verifier."
+    )
     epochs: int = Field(default=20, description="Number of training epochs.")
     checkpoint_freq: float = Field(
         default=1.0,

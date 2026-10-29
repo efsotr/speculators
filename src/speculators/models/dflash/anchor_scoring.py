@@ -24,10 +24,7 @@ def eager_score_chunk(last_hidden, positions, norm, head, flatness):
 def _compiled_scorer():
     # Compile the norm too; compiling only a post-logits reduction leaves the
     # gather/norm and float32 vocabulary intermediates on the eager path.
-    # Qwen RMSNorm deliberately casts to bf16/fp16 before its weight multiply.
-    # Without this option Inductor can erase that rounding and perturb rankings.
-    return torch.compile(eager_score_chunk, fullgraph=True, dynamic=True,
-                         options={"emulate_precision_casts": True})
+    return torch.compile(eager_score_chunk, fullgraph=True, dynamic=True)
 
 
 def score_chunk(last_hidden, positions, norm, head, flatness, backend):

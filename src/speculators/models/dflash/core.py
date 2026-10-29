@@ -163,6 +163,59 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             keys_to_ignore_on_load_missing
         )
 
+    def configure_compile(
+        self, *, mode="default", activation_memory_budget=0.99,
+        emulate_precision_casts=False, pad_target_hidden_states=False,
+        target_seq_len=8192,
+    ):
+        """Configure native forward before DDP/FSDP wrapping or its first call."""
+        if mode not in {"default", "max-autotune"}:
+            raise ValueError(f"Unsupported draft compile mode: {mode}")
+        if not 0 <= activation_memory_budget <= 1:
+            raise ValueError("activation_memory_budget must be between 0 and 1")
+        if target_seq_len <= 0:
+            raise ValueError("target_seq_len must be positive")
+        # In this torch version the partitioner setting lives in functorch,
+        # not torch._dynamo.config.
+        import torch._functorch.config as partition_config
+        import torch._inductor.config as inductor_config
+        partition_config.activation_memory_budget = activation_memory_budget
+        inductor_config.emulate_precision_casts = emulate_precision_casts
+        self._pad_target_seq_len = target_seq_len if pad_target_hidden_states else None
+        original = getattr(type(self).forward, "_torchdynamo_orig_callable", type(self).forward)
+        bound_forward = original.__get__(self, type(self))
+        self.forward = (
+            torch.compile(bound_forward, mode=mode)
+            if torch.cuda.is_available() else bound_forward
+        )
+
+    def _pad_target_inputs(
+        self, hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+        document_ids, position_ids,
+    ):
+        """Right-pad the entire base sequence so hidden states and mask ids agree."""
+        width = getattr(self, "_pad_target_seq_len", None)
+        if width is None:
+            return (hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+                    document_ids, position_ids)
+        length = hidden_states.shape[1]
+        if length > width:
+            raise ValueError("Target sequence exceeds configured padded length")
+        if position_ids is None:
+            position_ids = torch.arange(length, device=hidden_states.device).unsqueeze(0)
+        values = (hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+                  document_ids, position_ids)
+        for value in values:
+            if value.shape[1] != length:
+                raise ValueError("Target hidden states and all token/mask ids must align")
+        def pad(value, fill=0):
+            if length == width:
+                return value
+            extra = value.new_full((value.shape[0], width - length, *value.shape[2:]), fill)
+            return torch.cat((value, extra), dim=1)
+        return (pad(hidden_states), pad(input_ids), pad(loss_mask),
+                pad(verifier_last_hidden_states), pad(document_ids, -1), pad(position_ids))
+
     @property
     def target_layer_ids(self) -> list[int]:
         """Target layer IDs for auxiliary hidden states."""
@@ -349,13 +402,14 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
 
     @torch.compiler.disable
     def _build_attention_mask(self, loss_mask, max_anchors, document_ids, device,
-                              selected_anchors=None):
+                              selected_anchors=None, anchor_seq_len=None):
         total_seq_len = loss_mask.shape[1]
 
         if selected_anchors is None:
             from speculators.models.dflash.anchor_sampling import select_static_anchors
             anchor_positions, anchor_valid = select_static_anchors(
-                loss_mask, max_anchors, self.block_size, document_ids,
+                loss_mask[:, :anchor_seq_len], max_anchors, self.block_size,
+                document_ids[:, :anchor_seq_len],
                 sample_from_anchor=self.config.sample_from_anchor,
             )
         else:
@@ -507,6 +561,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         """
         device = hidden_states.device
         total_seq_len = hidden_states.shape[1]
+        anchor_seq_len = kwargs.pop("_anchor_seq_len", total_seq_len)
         num_anchors = kwargs.pop("max_anchors", 512)
         selected_anchors = kwargs.pop("_selected_anchors", None)
         anchor_scan = kwargs.pop("_anchor_scan", False)
@@ -525,13 +580,16 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
 
         if selected_anchors is None and sampling is not None:
             selected_anchors = self._sample_training_anchors(
-                hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
-                document_ids, position_ids, num_anchors, sampling, sampling_epoch,
+                hidden_states[:, :anchor_seq_len], input_ids[:, :anchor_seq_len],
+                loss_mask[:, :anchor_seq_len], verifier_last_hidden_states[:, :anchor_seq_len],
+                document_ids[:, :anchor_seq_len], position_ids[:, :anchor_seq_len],
+                num_anchors, sampling, sampling_epoch,
                 sampling_epochs, sampling_step, sampling_rank,
             )
         full_attn_mask, sliding_window_attn_mask, anchor_positions, anchor_valid = (
             self._build_attention_mask(loss_mask, num_anchors, document_ids, device,
-                                       selected_anchors=selected_anchors)
+                                       selected_anchors=selected_anchors,
+                                       anchor_seq_len=anchor_seq_len)
         )
 
         mask_tokens_size = num_anchors * self.block_size
@@ -634,6 +692,12 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         dpace_alpha: float = 0.5,
         **kwargs,
     ):
+        anchor_seq_len = hidden_states.shape[1]
+        (hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+         document_ids, position_ids) = self._pad_target_inputs(
+            hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+            document_ids, position_ids,
+        )
         _, logits, targets, aligned_loss_mask, _ = self._backbone_forward(
             hidden_states,
             input_ids,
@@ -642,6 +706,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             document_ids,
             position_ids,
             max_anchors=max_anchors,
+            _anchor_seq_len=anchor_seq_len,
             **kwargs,
         )
         loss, metrics = compute_metrics(

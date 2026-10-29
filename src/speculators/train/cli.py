@@ -770,6 +770,12 @@ def main(cfg: TrainConfig):  # noqa: C901
         fsdp_reshard_after_forward=args.fsdp_reshard_after_forward,
         gradient_checkpointing=args.gradient_checkpointing,
         max_steps=args.max_steps,
+        ddp_compile_optimizer=args.ddp_compile_optimizer,
+        draft_compile_mode=args.draft_compile_mode,
+        activation_memory_budget=args.activation_memory_budget,
+        emulate_precision_casts=args.emulate_precision_casts,
+        pad_target_hidden_states=args.pad_target_hidden_states,
+        target_seq_len=args.total_seq_len,
     )
     trainer = Trainer(draft_model, trainer_config, train_loader, val_loader)
 

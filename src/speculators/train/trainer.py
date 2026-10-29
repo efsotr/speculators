@@ -174,6 +174,12 @@ class TrainerConfig(NamedTuple):
     fsdp_reshard_after_forward: bool = True
     gradient_checkpointing: bool = False
     max_steps: int | None = None
+    ddp_compile_optimizer: bool = True
+    draft_compile_mode: Literal["default", "max-autotune"] = "default"
+    activation_memory_budget: float = 0.99
+    emulate_precision_casts: bool = False
+    pad_target_hidden_states: bool = False
+    target_seq_len: int = 8192
 
 
 def _resolve_scheduler_steps(
@@ -333,6 +339,19 @@ class Trainer:
                 )
 
     def setup_model(self):
+        # Set before DDP construction and the first compiled forward. Disabling
+        # partitioning keeps the native C++ reducer, but loses compiled overlap.
+        import torch._dynamo.config as dynamo_config
+        dynamo_config.optimize_ddp = self.config.ddp_compile_optimizer
+        configure_compile = getattr(self.model, "configure_compile", None)
+        if configure_compile is not None:
+            configure_compile(
+                mode=self.config.draft_compile_mode,
+                activation_memory_budget=self.config.activation_memory_budget,
+                emulate_precision_casts=self.config.emulate_precision_casts,
+                pad_target_hidden_states=self.config.pad_target_hidden_states,
+                target_seq_len=self.config.target_seq_len,
+            )
         # Verify model is compatible with training infrastructure
         SpeculatorModel.verify_training_compatible(self.model)
 

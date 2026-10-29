@@ -102,8 +102,8 @@ class OnlineTransfer(HiddenStatesTransfer):
             feature_forward = torch.compile(
                 feature_forward,
                 backend='inductor', fullgraph=True, dynamic=True,
-                # Preserve eager BF16 rounding through fused RMSNorm/RoPE operations.
-                options={'emulate_precision_casts': True},
+                options={'emulate_precision_casts': getattr(
+                    self.args, 'emulate_precision_casts', False)},
             )
         # Publish only after setup succeeds. First invocation performs compilation.
         self.device = device

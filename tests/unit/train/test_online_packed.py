@@ -10,7 +10,10 @@ from datasets import Dataset
 from torch.utils.data import DataLoader
 
 from speculators.train.data import ArrowDataset, CollateFn
-from speculators.train.online_backend import OnlineTransfer, PackedQwen3Features
+from speculators.train.online_backend import (
+    OnlineBackend, OnlineGPUBackend, OnlineGPUTransfer, OnlineTransfer,
+    PackedQwen3Features,
+)
 
 
 def make_transfer(tmp_path, limit=3):
@@ -84,6 +87,63 @@ def test_non_online_loader_keeps_single_sample_path(tmp_path):
                       max_sample_seq_len=3, hidden_states_dtype=torch.float32)
     assert len(ds.__getitems__([0, 1])) == 2
     assert len(calls) == 2
+
+
+def test_online_gpu_preserves_feature_device_through_dataset_and_collate(tmp_path):
+    """Meta features fail if copied to CPU, exercising the residency contract."""
+    from speculators.train.dataloader import _setup_dataloader
+
+    path, transfer, _ = make_transfer(tmp_path)
+    transfer.__class__ = OnlineGPUTransfer
+    transfer.feature_forward = lambda ids, *_: torch.empty(
+        (ids.numel(), 3, 2), device='meta', dtype=torch.float32,
+    )
+    ds = ArrowDataset(max_len=8, datapath=path, transfer=transfer,
+                      max_sample_seq_len=3, train_ratio=0.75,
+                      hidden_states_dtype=torch.float32)
+    samples = ds.__getitems__([0, 1, 2])
+    batch = CollateFn(8, 2, 2, dtype=torch.float32)(samples)
+    assert batch['hidden_states'].device.type == 'meta'
+    assert batch['verifier_last_hidden_states'].device.type == 'meta'
+    assert batch['hidden_states'].shape == (1, 8, 4)
+    assert batch['verifier_last_hidden_states'].shape == (1, 8, 2)
+    assert batch['input_ids'].device.type == 'cpu'
+    assert batch['loss_mask'].device.type == 'cpu'
+    assert batch['position_ids'].device.type == 'cpu'
+    assert batch['document_ids'].tolist() == [[0, 0, 0, 1, 2, 2, -1, -1]]
+    loader = _setup_dataloader(ds, 8, 2, num_workers=0, num_target_layers=2)
+    assert loader.pin_memory is False
+    with pytest.raises(ValueError, match='num_workers=0'):
+        _setup_dataloader(ds, 8, 2, num_workers=1, num_target_layers=2)
+
+
+@pytest.mark.parametrize('backend,transfer_type', [
+    (OnlineBackend, OnlineTransfer), (OnlineGPUBackend, OnlineGPUTransfer),
+])
+def test_online_backends_select_transfer_and_require_training_process(
+    backend, transfer_type,
+):
+    from hs_connectors import HiddenStatesBackend
+
+    name = 'online_gpu' if backend is OnlineGPUBackend else 'online'
+    assert HiddenStatesBackend.registry[name] is backend
+    args = SimpleNamespace(target_layer_ids=[0, 1], num_workers=0)
+    transfer = backend.from_train_args(args, 'prepared')
+    assert type(transfer) is transfer_type
+    assert transfer.returns_cuda_tensors is (backend is OnlineGPUBackend)
+    args.num_workers = 1
+    with pytest.raises(ValueError, match='num_workers: 0'):
+        backend.from_train_args(args, 'prepared')
+
+
+def test_cpu_online_loader_keeps_pinned_memory(tmp_path):
+    from speculators.train.dataloader import _setup_dataloader
+
+    path, transfer, _ = make_transfer(tmp_path)
+    ds = ArrowDataset(max_len=8, datapath=path, transfer=transfer,
+                      max_sample_seq_len=3, hidden_states_dtype=torch.float32)
+    loader = _setup_dataloader(ds, 8, 2, num_workers=0, num_target_layers=2)
+    assert loader.pin_memory is True
 
 
 @pytest.mark.parametrize('compile_setting', [None, True, False],

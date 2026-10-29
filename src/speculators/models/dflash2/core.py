@@ -159,6 +159,12 @@ class DFlash2DraftModel(DFlashDraftModel):
         dpace_alpha: float = 0.5,
         **kwargs,
     ) -> tuple[None, torch.Tensor, dict[str, Any]]:
+        anchor_seq_len = hidden_states.shape[1]
+        (hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+         document_ids, position_ids) = self._pad_target_inputs(
+            hidden_states, input_ids, loss_mask, verifier_last_hidden_states,
+            document_ids, position_ids,
+        )
         hidden, unary_logits, targets, aligned_loss_mask, block_indices = (
             self._backbone_forward(
                 hidden_states,
@@ -168,6 +174,7 @@ class DFlash2DraftModel(DFlashDraftModel):
                 document_ids,
                 position_ids,
                 max_anchors=max_anchors,
+                _anchor_seq_len=anchor_seq_len,
                 **kwargs,
             )
         )
