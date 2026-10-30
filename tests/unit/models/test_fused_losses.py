@@ -152,6 +152,7 @@ def test_compiles_fullgraph(name, eager_fn, fused_name):
 
 @requires_cuda
 @pytest.mark.parametrize("fused_name", ["fused_kl_div_loss", "fused_ce_loss"])
+@torch._dynamo.config.patch(compiled_autograd=True)
 def test_compiled_autograd_fullgraph(fused_name):
     """CA must capture the dispatcher op without a raw Triton HOP adapter."""
     fused_losses = pytest.importorskip("speculators.losses.fused")
@@ -160,19 +161,21 @@ def test_compiled_autograd_fullgraph(fused_name):
 
     def compile_backward(gm):
         graphs.append(gm)
-        return torch.compile(gm, fullgraph=True)
+        return torch.compile(gm, mode="max-autotune", fullgraph=True)
 
-    compiled = torch.compile(lambda a, b: fused_fn(a, b).sum(), fullgraph=True)
+    compiled = torch.compile(
+        lambda a, b: fused_fn(a, b).sum(), mode="max-autotune", fullgraph=True
+    )
     for _ in range(2):
-        logits = torch.randn(1, 8, 512, device="cuda", dtype=torch.bfloat16)
+        logits = torch.randn(1, 8, 4096, device="cuda", dtype=torch.bfloat16)
         targets = torch.randn_like(logits)
         reference = logits.detach().clone().requires_grad_(True)
         candidate = logits.detach().clone().requires_grad_(True)
-        expected = fused_fn(reference, targets).sum()
-        expected.backward()
         actual = compiled(candidate, targets)
         with torch._dynamo.compiled_autograd._enable(compile_backward):
             actual.backward()
+        expected = fused_fn(reference, targets).sum()
+        expected.backward()
         torch.testing.assert_close(actual, expected)
         torch.testing.assert_close(candidate.grad, reference.grad)
     assert graphs
