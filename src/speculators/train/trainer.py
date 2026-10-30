@@ -4,6 +4,7 @@ import os
 import time
 import warnings
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -175,6 +176,7 @@ class TrainerConfig(NamedTuple):
     gradient_checkpointing: bool = False
     max_steps: int | None = None
     ddp_compile_optimizer: bool = True
+    ddp_python_reducer: bool = False
     ddp_bucket_cap_mb: float | None = None
     draft_compile_mode: Literal["default", "max-autotune"] = "default"
     activation_memory_budget: float = 0.99
@@ -340,18 +342,37 @@ class Trainer:
                 )
 
     def setup_model(self):
-        # Set before DDP construction and the first compiled forward. Disabling
-        # partitioning keeps the native C++ reducer, but loses compiled overlap.
+        # Select the reducer before DDP construction and the first forward.
         import torch._dynamo.config as dynamo_config
-        dynamo_config.optimize_ddp = self.config.ddp_compile_optimizer
+        self._ddp_python_reducer = (
+            self.config.ddp_python_reducer
+            and self.is_distributed and not self.config.fsdp_shard
+        )
+        if self._ddp_python_reducer:
+            from speculators.models.dflash.core import DFlashDraftModel
+            if (
+                not isinstance(self.model, DFlashDraftModel)
+                or self.config.draft_compile_mode != "max-autotune"
+            ):
+                raise ValueError("ddp_python_reducer requires DFlash-family max-autotune")
+            self._previous_compiled_autograd = dynamo_config.compiled_autograd
+            dynamo_config.compiled_autograd = True
+            dynamo_config.optimize_ddp = "python_reducer"
+            self._backward_compiler = partial(
+                torch.compile, mode="max-autotune", fullgraph=True
+            )
+        else:
+            dynamo_config.optimize_ddp = self.config.ddp_compile_optimizer
         configure_compile = getattr(self.model, "configure_compile", None)
         if configure_compile is not None:
+            compile_kwargs = {"whole_forward": True} if self._ddp_python_reducer else {}
             configure_compile(
                 mode=self.config.draft_compile_mode,
                 activation_memory_budget=self.config.activation_memory_budget,
                 emulate_precision_casts=self.config.emulate_precision_casts,
                 pad_target_hidden_states=self.config.pad_target_hidden_states,
                 target_seq_len=self.config.target_seq_len,
+                **compile_kwargs,
             )
         # Verify model is compatible with training infrastructure
         SpeculatorModel.verify_training_compatible(self.model)
@@ -576,6 +597,9 @@ class Trainer:
                 for k, v in batch.items()
             }
 
+            if getattr(self, "_ddp_python_reducer", False):
+                self._optimizers_zero_grad()
+                torch.compiler.cudagraph_mark_step_begin()
             with torch.autocast(
                 self.device_type, dtype=self.config.hidden_states_dtype
             ):
@@ -600,8 +624,12 @@ class Trainer:
                 _draft_tokens, loss, metrics = self.model(**model_inputs)
 
             timer.mark("fwd")
-            self._optimizers_zero_grad()
-            loss.backward()
+            if getattr(self, "_ddp_python_reducer", False):
+                with torch._dynamo.compiled_autograd._enable(self._backward_compiler):
+                    loss.backward()
+            else:
+                self._optimizers_zero_grad()
+                loss.backward()
             timer.mark("pre_clip")
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
@@ -812,6 +840,14 @@ class Trainer:
         if self.config.save_best:
             self.checkpointer.cleanup_keep_only_best(best_epoch=epoch)
             _timing_event("checkpoint", epoch=epoch, seconds=time.perf_counter() - checkpoint_started)
+
+    def release_compiled_graphs(self):
+        """Release captured NCCL work before the CLI destroys its process group."""
+        if getattr(self, "_ddp_python_reducer", False):
+            from speculators.train.ddp_compile import release_cuda_graphs
+            release_cuda_graphs()
+            torch._dynamo.config.compiled_autograd = self._previous_compiled_autograd
+            self._ddp_python_reducer = False
 
     @with_graceful_shutdown()
     def run_training(self):

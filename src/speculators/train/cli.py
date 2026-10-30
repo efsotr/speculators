@@ -774,6 +774,7 @@ def main(cfg: TrainConfig):  # noqa: C901
         gradient_checkpointing=args.gradient_checkpointing,
         max_steps=args.max_steps,
         ddp_compile_optimizer=args.ddp_compile_optimizer,
+        ddp_python_reducer=args.ddp_python_reducer,
         ddp_bucket_cap_mb=args.ddp_bucket_cap_mb,
         draft_compile_mode=args.draft_compile_mode,
         activation_memory_budget=args.activation_memory_budget,
@@ -784,12 +785,13 @@ def main(cfg: TrainConfig):  # noqa: C901
     trainer = Trainer(draft_model, trainer_config, train_loader, val_loader)
 
     # Run training
-    trainer.run_training()
-
-    # Cleanup
-    del trainer, draft_model
-    gc.collect()
-    acc = torch.accelerator.current_accelerator(check_available=True)
-    if acc is not None:
-        torch.get_device_module(acc.type).empty_cache()
-    maybe_destroy_distributed()
+    try:
+        trainer.run_training()
+    finally:
+        trainer.release_compiled_graphs()
+        del trainer, draft_model
+        gc.collect()
+        acc = torch.accelerator.current_accelerator(check_available=True)
+        if acc is not None:
+            torch.get_device_module(acc.type).empty_cache()
+        maybe_destroy_distributed()

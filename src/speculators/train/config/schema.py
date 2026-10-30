@@ -485,6 +485,13 @@ class SchedulerArgs(_Group):
 
 
 class TrainerArgs(_Group):
+    ddp_python_reducer: bool = Field(
+        default=False,
+        description="Use the Python DDP reducer with compiled autograd and whole-forward "
+        "compilation for DFlash-family max-autotune. Overrides ddp_compile_optimizer; "
+        "ignored outside distributed DDP training.",
+        json_schema_extra=_CLI_BOOL_OPTIONAL,
+    )
     ddp_bucket_cap_mb: float | None = Field(
         default=None, gt=0.0, allow_inf_nan=False,
         description="DDP reducer and Dynamo DDPOptimizer bucket capacity in MiB. "

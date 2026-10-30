@@ -168,8 +168,9 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         self, *, mode="default", activation_memory_budget=0.99,
         emulate_precision_casts=False, pad_target_hidden_states=False,
         target_seq_len=8192,
+        whole_forward=False,
     ):
-        """Configure whole-forward/default or per-layer/max-autotune compilation."""
+        """Compile layers in max-autotune, or the whole forward for Python DDP."""
         if mode not in {"default", "max-autotune"}:
             raise ValueError(f"Unsupported draft compile mode: {mode}")
         if not 0 <= activation_memory_budget <= 1:
@@ -190,7 +191,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         )
         original = getattr(type(self).forward, "_torchdynamo_orig_callable", type(self).forward)
         bound_forward = original.__get__(self, type(self))
-        if mode == "max-autotune":
+        if mode == "max-autotune" and not whole_forward:
             # Keep the backbone loop and Module.__call__ (including FSDP hooks)
             # eager. Compile each layer's forward body inside that boundary.
             self.forward = bound_forward
