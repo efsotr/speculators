@@ -175,6 +175,7 @@ class TrainerConfig(NamedTuple):
     gradient_checkpointing: bool = False
     max_steps: int | None = None
     ddp_compile_optimizer: bool = True
+    ddp_bucket_cap_mb: float | None = None
     draft_compile_mode: Literal["default", "max-autotune"] = "default"
     activation_memory_budget: float = 0.99
     emulate_precision_casts: bool = False
@@ -426,7 +427,9 @@ class Trainer:
             dist.barrier()
 
         # DDP constructor broadcasts rank 0's params to all ranks
-        self.model = DistributedDataParallel(self.model)  # type: ignore[assignment]
+        self.model = DistributedDataParallel(  # type: ignore[assignment]
+            self.model, bucket_cap_mb=self.config.ddp_bucket_cap_mb
+        )
 
     def setup_optimizer(self):
         # Setup optimizer(s). The "muon" option returns two optimizers (Muon for the

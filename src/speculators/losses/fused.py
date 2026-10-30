@@ -29,6 +29,8 @@ lineage); TV gradient sign convention matches Liger ops/tvd.py.
 import torch
 import triton
 import triton.language as tl
+from torch._subclasses.functional_tensor import FunctionalTensorMode
+from torch.library import triton_op, wrap_triton
 
 from speculators.utils.util import is_npu_available
 
@@ -304,6 +306,48 @@ def loss_backward_kernel(
         tl.store(grad_in_ptr + offsets, go * grad, mask=mask)
 
 
+@triton_op("speculators::loss_forward", mutates_args=())
+def _loss_forward(
+    logits: torch.Tensor, targets: torch.Tensor, op: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Functional Triton boundary; forward remains available for AOT inlining."""
+    rows, vocab = logits.shape
+    loss = torch.empty(rows, device=logits.device, dtype=torch.float32)
+    stats = torch.empty(_N_STATS, rows, device=logits.device, dtype=torch.float32)
+    wrap_triton(loss_forward_kernel)[(rows,)](
+        logits, targets, loss, stats, stats.stride(0), vocab, OP=op
+    )
+    return loss, stats
+
+
+@triton_op("speculators::loss_backward", mutates_args=())
+def _loss_backward(
+    logits: torch.Tensor,
+    targets: torch.Tensor | None,
+    grad_output: torch.Tensor,
+    stats: torch.Tensor,
+    op: int,
+) -> torch.Tensor:
+    rows, vocab = logits.shape
+    grad_in = torch.empty_like(logits)
+    wrap_triton(loss_backward_kernel)[(rows,)](
+        logits, targets, grad_in, grad_output, stats, stats.stride(0), vocab, OP=op
+    )
+    return grad_in
+
+
+# AOTAutograd otherwise expands triton_op into a functional Triton HOP before
+# Compiled Autograd sees it. Torch 2.13 cannot retrace that HOP. Preserve this
+# dispatcher boundary through functionalization; Inductor can capture its
+# Triton-backed custom-op call without tracing the HOP a second time. This
+# deliberately gives up Inductor inlining of this backward kernel only.
+
+
+@_loss_backward.register_torch_dispatch(FunctionalTensorMode)
+def _preserve_loss_backward(mode, op, types, args, kwargs):
+    return mode.__torch_dispatch__(op, types, args, kwargs)
+
+
 class _FusedLoss(torch.autograd.Function):
     """Shared autograd wrapper; ``op`` selects the loss reduction.
 
@@ -316,17 +360,7 @@ class _FusedLoss(torch.autograd.Function):
         B, T, V = logits.shape
         logits_flat = logits.contiguous().view(B * T, V)
         targets_flat = targets.contiguous().view(B * T, V)
-        loss = torch.empty(B * T, device=logits.device, dtype=torch.float32)
-        stats = torch.empty(_N_STATS, B * T, device=logits.device, dtype=torch.float32)
-        loss_forward_kernel[(B * T,)](
-            logits_flat,
-            targets_flat,
-            loss,
-            stats,
-            stats.stride(0),
-            V,
-            OP=op,
-        )
+        loss, stats = _loss_forward(logits_flat, targets_flat, op)
         # CE backward only needs the target argmax cached in stats.
         ctx.save_for_backward(
             logits_flat, None if op == _OP_CE.value else targets_flat, stats
@@ -339,16 +373,12 @@ class _FusedLoss(torch.autograd.Function):
     def backward(ctx, grad_output):
         logits_flat, targets_flat, stats = ctx.saved_tensors
         B, T, V = ctx.shape
-        grad_in = torch.empty_like(logits_flat)
-        loss_backward_kernel[(B * T,)](
+        grad_in = _loss_backward(
             logits_flat,
             targets_flat,
-            grad_in,
             grad_output.contiguous().view(-1),
             stats,
-            stats.stride(0),
-            V,
-            OP=ctx.op,
+            ctx.op,
         )
         return grad_in.view(B, T, V), None, None
 

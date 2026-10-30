@@ -151,6 +151,42 @@ def test_compiles_fullgraph(name, eager_fn, fused_name):
 
 
 @requires_cuda
+@pytest.mark.parametrize("fused_name", ["fused_kl_div_loss", "fused_ce_loss"])
+def test_compiled_autograd_fullgraph(fused_name):
+    """CA must capture the dispatcher op without a raw Triton HOP adapter."""
+    fused_losses = pytest.importorskip("speculators.losses.fused")
+    fused_fn = getattr(fused_losses, fused_name)
+    graphs = []
+
+    def compile_backward(gm):
+        graphs.append(gm)
+        return torch.compile(gm, fullgraph=True)
+
+    compiled = torch.compile(lambda a, b: fused_fn(a, b).sum(), fullgraph=True)
+    for _ in range(2):
+        logits = torch.randn(1, 8, 512, device="cuda", dtype=torch.bfloat16)
+        targets = torch.randn_like(logits)
+        reference = logits.detach().clone().requires_grad_(True)
+        candidate = logits.detach().clone().requires_grad_(True)
+        expected = fused_fn(reference, targets).sum()
+        expected.backward()
+        actual = compiled(candidate, targets)
+        with torch._dynamo.compiled_autograd._enable(compile_backward):
+            actual.backward()
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(candidate.grad, reference.grad)
+    assert graphs
+    assert any(
+        node.target == torch.ops.speculators.loss_backward.default
+        for gm in graphs for node in gm.graph.nodes
+    )
+    assert not any(
+        "triton_kernel_wrapper" in str(node.target)
+        for gm in graphs for node in gm.graph.nodes
+    )
+
+
+@requires_cuda
 def test_ce_releases_targets_before_backward():
     """CE releases targets after forward; distribution losses retain them."""
     fused_losses = pytest.importorskip("speculators.losses.fused")

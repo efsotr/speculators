@@ -16,12 +16,26 @@ from speculators.train.config.schema import (
     DraftArgs,
     LossArgs,
     OptimizerArgs,
+    TrainerArgs,
 )
 
 
 def test_constructs_from_defaults():
     # The whole point of the schema seam: a config exists with no inputs.
     TrainConfig()
+
+
+@pytest.mark.parametrize("capacity", [None, 25, 128, 256, 512, 1024])
+def test_ddp_bucket_capacity_round_trip(capacity):
+    cfg = TrainConfig(trainer=TrainerArgs(ddp_bucket_cap_mb=capacity))
+    assert TrainConfig.from_flat(cfg.flatten()) == cfg
+    assert cfg.flatten()["ddp_bucket_cap_mb"] == capacity
+
+
+@pytest.mark.parametrize("capacity", [0, -1, float("inf"), float("nan")])
+def test_ddp_bucket_capacity_rejects_invalid_values(capacity):
+    with pytest.raises(ValueError):
+        TrainerArgs(ddp_bucket_cap_mb=capacity)
 
 
 def test_flatten_covers_exactly_the_schema_fields():

@@ -774,6 +774,7 @@ def main(cfg: TrainConfig):  # noqa: C901
         gradient_checkpointing=args.gradient_checkpointing,
         max_steps=args.max_steps,
         ddp_compile_optimizer=args.ddp_compile_optimizer,
+        ddp_bucket_cap_mb=args.ddp_bucket_cap_mb,
         draft_compile_mode=args.draft_compile_mode,
         activation_memory_budget=args.activation_memory_budget,
         emulate_precision_casts=args.emulate_precision_casts,

@@ -485,6 +485,11 @@ class SchedulerArgs(_Group):
 
 
 class TrainerArgs(_Group):
+    ddp_bucket_cap_mb: float | None = Field(
+        default=None, gt=0.0, allow_inf_nan=False,
+        description="DDP reducer and Dynamo DDPOptimizer bucket capacity in MiB. "
+        "Unset preserves PyTorch's 25 MiB default and smaller first bucket.",
+    )
     ddp_compile_optimizer: bool = Field(
         default=True,
         description="Enable Dynamo DDP bucket graph partitioning for communication/compute "
