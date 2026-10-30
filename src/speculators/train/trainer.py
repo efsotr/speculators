@@ -77,7 +77,7 @@ class _StepTimer:
     def __init__(self, enabled: bool = False):
         self.enabled = enabled
         self._marks: dict[str, float] = {}
-        self._memory: dict[str, float] = {}
+        self._memory: dict[str, dict[str, float]] = {}
 
     def reset(self, enabled: bool) -> None:
         self.enabled = enabled
@@ -89,7 +89,18 @@ class _StepTimer:
             torch.accelerator.synchronize()
             self._marks[name] = time.perf_counter()
             if torch.accelerator.is_available():
-                self._memory[name] = torch.accelerator.memory_allocated() / (1024**2)
+                # Cached means allocator-reserved memory, including live tensors.
+                # Read peaks without resetting the allocator's statistics.
+                self._memory[name] = {
+                    "allocated": torch.accelerator.memory_allocated() / (1024**2),
+                    "cached": torch.accelerator.memory_reserved() / (1024**2),
+                    "max-allocated": (
+                        torch.accelerator.max_memory_allocated() / (1024**2)
+                    ),
+                    "max-cached": (
+                        torch.accelerator.max_memory_reserved() / (1024**2)
+                    ),
+                }
 
     def mark_value(self, name: str, value: float) -> None:
         if self.enabled:

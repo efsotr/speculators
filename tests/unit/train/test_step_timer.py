@@ -1,8 +1,16 @@
+import logging
 from unittest.mock import patch
 
 import pytest
 
+from speculators.train.logger import FormatDictFilter
 from speculators.train.trainer import _StepTimer
+
+
+@pytest.fixture(autouse=True)
+def mock_accelerator_availability(monkeypatch):
+    # Timer unit tests must not initialize a real accelerator.
+    monkeypatch.setattr("torch.accelerator.is_available", lambda: False)
 
 
 def test_disabled_timer_returns_none():
@@ -141,3 +149,57 @@ def test_zero_step_ms_returns_zero_throughput():
     assert profile is not None
     assert profile["tokens_per_s"] == 0.0
     assert profile["fetch_frac"] == 0.0
+
+
+def test_memory_metrics_are_logged_in_mib_and_reset_between_steps(monkeypatch):
+    monkeypatch.setattr("torch.accelerator.is_available", lambda: True)
+    phases = ("queue", "pre_h2d", "fetch", "fwd", "pre_clip", "bwd", "opt")
+    timer = _StepTimer(enabled=True)
+    timer.mark_value("start", 0.0)
+    with (
+        patch("torch.accelerator.synchronize"),
+        patch("torch.accelerator.memory_allocated", return_value=1.5 * 1024**2),
+        patch("torch.accelerator.memory_reserved", return_value=3 * 1024**2),
+        patch("torch.accelerator.max_memory_allocated", return_value=2 * 1024**2),
+        patch("torch.accelerator.max_memory_reserved", return_value=4 * 1024**2),
+        patch("torch.accelerator.reset_peak_memory_stats") as reset_peaks,
+    ):
+        for phase in phases:
+            timer.mark(phase)
+        reset_peaks.assert_not_called()
+
+    profile = timer.profile(num_tokens=1024)
+    expected = {
+        "allocated": 1.5,
+        "cached": 3.0,
+        "max-allocated": 2.0,
+        "max-cached": 4.0,
+    }
+    assert profile["memory_mb"] == dict.fromkeys(phases, expected)
+    record = logging.makeLogRecord({"msg": {"profile": profile}})
+    FormatDictFilter().filter(record)
+    for phase in phases:
+        for metric, value in expected.items():
+            assert f"profile/memory_mb/{phase}/{metric}={value:.3f}" in record.msg
+
+    timer.reset(enabled=False)
+    assert timer._memory == {}
+    with patch("torch.accelerator.memory_allocated") as allocated:
+        timer.mark("fwd")
+        allocated.assert_not_called()
+    assert timer.profile(num_tokens=1024) is None
+    # Resetting the timer leaves a previously returned profile intact.
+    assert set(profile["memory_mb"]) == set(phases)
+
+
+def test_no_memory_metrics_without_accelerator():
+    timer = _StepTimer(enabled=True)
+    timer.mark_value("start", 0.0)
+    with (
+        patch("torch.accelerator.synchronize"),
+        patch("torch.accelerator.memory_reserved") as reserved,
+    ):
+        for phase in ("queue", "pre_h2d", "fetch", "fwd", "pre_clip", "bwd", "opt"):
+            timer.mark(phase)
+        reserved.assert_not_called()
+    assert "memory_mb" not in timer.profile(num_tokens=1024)
