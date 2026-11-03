@@ -166,7 +166,7 @@ def test_memory_metrics_are_logged_in_mib_and_reset_between_steps(monkeypatch):
     ):
         for phase in phases:
             timer.mark(phase)
-        reset_peaks.assert_not_called()
+        assert reset_peaks.call_count == len(phases)
 
     profile = timer.profile(num_tokens=1024)
     expected = {

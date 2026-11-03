@@ -90,7 +90,7 @@ class _StepTimer:
             self._marks[name] = time.perf_counter()
             if torch.accelerator.is_available():
                 # Cached means allocator-reserved memory, including live tensors.
-                # Read peaks without resetting the allocator's statistics.
+                # Each peak covers the interval since the previous sample/reset.
                 self._memory[name] = {
                     "allocated": torch.accelerator.memory_allocated() / (1024**2),
                     "cached": torch.accelerator.memory_reserved() / (1024**2),
@@ -101,6 +101,7 @@ class _StepTimer:
                         torch.accelerator.max_memory_reserved() / (1024**2)
                     ),
                 }
+                torch.accelerator.reset_peak_memory_stats()
 
     def mark_value(self, name: str, value: float) -> None:
         if self.enabled:
