@@ -553,6 +553,11 @@ def _gather_per_rank(entry: dict) -> list[dict]:
     return [entry]
 
 
+def _allocated_memory_mb(mark: float | dict[str, float]) -> float:
+    """Read allocated MiB from current timer marks or legacy scalar results."""
+    return mark["allocated"] if isinstance(mark, dict) else mark
+
+
 def _phase_peaks(measured_profiles: list[dict]) -> dict[str, float]:
     """Peak allocated MiB at each timer phase, over the measured steps.
 
@@ -562,6 +567,7 @@ def _phase_peaks(measured_profiles: list[dict]) -> dict[str, float]:
     peaks: dict[str, float] = {}
     for profile in measured_profiles:
         for phase, mb in profile.get("memory_mb", {}).items():
+            mb = _allocated_memory_mb(mb)
             if mb > peaks.get(phase, 0.0):
                 peaks[phase] = mb
     return {phase: round(mb, 2) for phase, mb in peaks.items()}
@@ -1127,7 +1133,12 @@ def _build_memory_traces(per_step):
     steps = list(range(len(per_step)))
     traces = []
     for mark, label in _MEMORY_MARK_LABELS.items():
-        values = [s.get("memory_mb", {}).get(mark) for s in per_step]
+        values = [
+            _allocated_memory_mb(s["memory_mb"][mark])
+            if mark in s.get("memory_mb", {})
+            else None
+            for s in per_step
+        ]
         if not any(v is not None for v in values):
             continue
         traces.append(go.Scatter(x=steps, y=values, mode="lines", name=label))
@@ -1198,7 +1209,7 @@ def _build_memory_fig(per_step):
     stds = []
     for mark in _MEMORY_MARK_LABELS:
         vals = [
-            s["memory_mb"][mark]
+            _allocated_memory_mb(s["memory_mb"][mark])
             for s in per_step
             if "memory_mb" in s and mark in s["memory_mb"]
         ]
