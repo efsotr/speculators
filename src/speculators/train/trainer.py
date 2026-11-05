@@ -131,8 +131,19 @@ class _StepTimer:
             "h2d_ms": (m["fetch"] - m["pre_h2d"]) * 1000,
             "clip_ms": (m["bwd"] - m["pre_clip"]) * 1000,
         }
-        if self._memory:
-            result["memory_mb"] = dict(self._memory)
+        # Keep every rank's allocator statistics; these are not additive metrics.
+        # All ranks participate at log_freq, but only rank zero consumes the logs.
+        memory = dict(self._memory)
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            gathered = [None] * dist.get_world_size() if dist.get_rank() == 0 else None
+            dist.gather_object(memory, object_gather_list=gathered, dst=0)
+            memories = gathered or []
+        else:
+            memories = [memory]
+        if any(memories):
+            result["memory_mb"] = {
+                f"rank{rank}": marks for rank, marks in enumerate(memories)
+            }
         return result
 
 

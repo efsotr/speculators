@@ -175,12 +175,12 @@ def test_memory_metrics_are_logged_in_mib_and_reset_between_steps(monkeypatch):
         "max-allocated": 2.0,
         "max-cached": 4.0,
     }
-    assert profile["memory_mb"] == dict.fromkeys(phases, expected)
+    assert profile["memory_mb"] == {"rank0": dict.fromkeys(phases, expected)}
     record = logging.makeLogRecord({"msg": {"profile": profile}})
     FormatDictFilter().filter(record)
     for phase in phases:
         for metric, value in expected.items():
-            assert f"profile/memory_mb/{phase}/{metric}={value:.3f}" in record.msg
+            assert f"profile/memory_mb/rank0/{phase}/{metric}={value:.3f}" in record.msg
 
     timer.reset(enabled=False)
     assert timer._memory == {}
@@ -189,7 +189,7 @@ def test_memory_metrics_are_logged_in_mib_and_reset_between_steps(monkeypatch):
         allocated.assert_not_called()
     assert timer.profile(num_tokens=1024) is None
     # Resetting the timer leaves a previously returned profile intact.
-    assert set(profile["memory_mb"]) == set(phases)
+    assert set(profile["memory_mb"]["rank0"]) == set(phases)
 
 
 def test_no_memory_metrics_without_accelerator():
@@ -203,3 +203,51 @@ def test_no_memory_metrics_without_accelerator():
             timer.mark(phase)
         reserved.assert_not_called()
     assert "memory_mb" not in timer.profile(num_tokens=1024)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_memory_gather_preserves_each_rank_without_reducing(rank):
+    timer = _StepTimer(enabled=True)
+    timer._marks = dict.fromkeys(
+        ("start", "queue", "pre_h2d", "fetch", "fwd", "pre_clip", "bwd", "opt"), 1.0
+    )
+    memories = [
+        {
+            "fwd": {
+                "allocated": 1.0,
+                "cached": 2.0,
+                "max-allocated": 3.0,
+                "max-cached": 4.0,
+            }
+        },
+        {
+            "fwd": {
+                "allocated": 11.0,
+                "cached": 12.0,
+                "max-allocated": 13.0,
+                "max-cached": 14.0,
+            }
+        },
+    ]
+    timer._memory = memories[rank]
+
+    def gather(memory, object_gather_list, dst):
+        assert memory == memories[rank]
+        assert dst == 0
+        if rank == 0:
+            object_gather_list[:] = memories
+        else:
+            assert object_gather_list is None
+
+    with (
+        patch("torch.distributed.is_initialized", return_value=True),
+        patch("torch.distributed.get_world_size", return_value=2),
+        patch("torch.distributed.get_rank", return_value=rank),
+        patch("torch.distributed.gather_object", side_effect=gather) as collective,
+    ):
+        profile = timer.profile(num_tokens=1024)
+    collective.assert_called_once()
+    if rank == 0:
+        assert profile["memory_mb"] == {"rank0": memories[0], "rank1": memories[1]}
+    else:
+        assert "memory_mb" not in profile

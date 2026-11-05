@@ -558,6 +558,16 @@ def _allocated_memory_mb(mark: float | dict[str, float]) -> float:
     return mark["allocated"] if isinstance(mark, dict) else mark
 
 
+def _rank0_memory(profile: dict) -> dict:
+    """Rank-zero phase marks for timing charts, including older result layouts.
+
+    Raw profiles retain gathered marks for all ranks. These charts match the
+    rank-zero timing series; the per-rank peak summary is reported separately.
+    """
+    memory = profile.get("memory_mb", {})
+    return memory.get("rank0", memory)
+
+
 def _phase_peaks(measured_profiles: list[dict]) -> dict[str, float]:
     """Peak allocated MiB at each timer phase, over the measured steps.
 
@@ -566,7 +576,7 @@ def _phase_peaks(measured_profiles: list[dict]) -> dict[str, float]:
     """
     peaks: dict[str, float] = {}
     for profile in measured_profiles:
-        for phase, mb in profile.get("memory_mb", {}).items():
+        for phase, mb in _rank0_memory(profile).items():
             mb = _allocated_memory_mb(mb)
             if mb > peaks.get(phase, 0.0):
                 peaks[phase] = mb
@@ -1134,8 +1144,8 @@ def _build_memory_traces(per_step):
     traces = []
     for mark, label in _MEMORY_MARK_LABELS.items():
         values = [
-            _allocated_memory_mb(s["memory_mb"][mark])
-            if mark in s.get("memory_mb", {})
+            _allocated_memory_mb(_rank0_memory(s)[mark])
+            if mark in _rank0_memory(s)
             else None
             for s in per_step
         ]
@@ -1209,9 +1219,9 @@ def _build_memory_fig(per_step):
     stds = []
     for mark in _MEMORY_MARK_LABELS:
         vals = [
-            _allocated_memory_mb(s["memory_mb"][mark])
+            _allocated_memory_mb(_rank0_memory(s)[mark])
             for s in per_step
-            if "memory_mb" in s and mark in s["memory_mb"]
+            if mark in _rank0_memory(s)
         ]
         means.append(statistics.mean(vals) if vals else 0)
         stds.append(statistics.stdev(vals) if len(vals) > 1 else 0.0)

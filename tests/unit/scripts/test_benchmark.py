@@ -20,6 +20,8 @@ from benchmark import (  # type: ignore[import-not-found]
     _aggregate_kernel_rows,
     _aggregate_timing,
     _build_kernel_pie,
+    _build_memory_fig,
+    _build_memory_traces,
     _fmt_welch,
     _gather_per_rank,
     _get_phase_means,
@@ -525,6 +527,33 @@ class TestPhasePeaks:
             {"step_ms": 1.0},  # step without memory marks (CPU-only run)
         ]
         assert _phase_peaks(profiles) == {"fwd": 120.5, "bwd": 150.0}
+
+    def test_gathered_rank_memory_uses_rank0_for_timing_charts(self):
+        profiles = [
+            {
+                "memory_mb": {
+                    "rank0": {"fwd": {"allocated": 120.5, "cached": 150.0}},
+                    "rank1": {"fwd": {"allocated": 999.0, "cached": 1000.0}},
+                }
+            }
+        ]
+        assert _phase_peaks(profiles) == {"fwd": 120.5}
+
+    def test_gathered_rank_memory_charts(self):
+        profiles = [
+            {
+                "memory_mb": {
+                    "rank0": {"fwd": {"allocated": 120.5, "cached": 150.0}},
+                    "rank1": {"fwd": {"allocated": 999.0, "cached": 1000.0}},
+                }
+            }
+        ]
+        traces = _build_memory_traces(profiles)
+        assert len(traces) == 1
+        assert list(traces[0].y) == [120.5]
+        fig = _build_memory_fig(profiles)
+        assert 120.5 in fig.data[0].y
+        assert 999.0 not in fig.data[0].y
 
 
 class TestGatherPerRank:
