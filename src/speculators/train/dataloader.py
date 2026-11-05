@@ -123,7 +123,7 @@ def create_train_val_loaders(
     max_val_samples: int | None = None,
     max_sample_seq_len: int | None = None,
     seed: int = 0,
-) -> tuple[DataLoader, DataLoader]:
+) -> tuple[DataLoader, DataLoader | None]:
     """Create training and validation DataLoaders.
 
     Non-data SP ranks get lightweight loaders with no workers (they receive
@@ -132,7 +132,8 @@ def create_train_val_loaders(
 
     ``seed`` sets the training packing order and must be the same on every
     rank. Validation keeps a fixed order, so runs with different seeds are
-    validated on the same packed batches.
+    validated on the same packed batches. ``max_val_samples=0`` skips validation
+    dataset and loader construction.
     """
     _limit_worker_threads()
 
@@ -156,6 +157,20 @@ def create_train_val_loaders(
         generation_validation_retries=generation_validation_retries,
         max_consecutive_generation_failures=max_consecutive_generation_failures,
     )
+    train_loader = _setup_dataloader(
+        train_dataset,
+        total_seq_len,
+        hidden_size,
+        num_target_layers=num_target_layers,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        preprocess=preprocess,
+        max_batches=max_train_batches,
+        seed=seed,
+    )
+    if max_val_samples == 0:
+        return train_loader, None
+
     val_dataset: BaseDataset = ArrowDataset(
         datapath=data_path,
         max_len=total_seq_len,
@@ -174,17 +189,6 @@ def create_train_val_loaders(
         max_consecutive_generation_failures=max_consecutive_generation_failures,
     )
 
-    train_loader = _setup_dataloader(
-        train_dataset,
-        total_seq_len,
-        hidden_size,
-        num_target_layers=num_target_layers,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-        preprocess=preprocess,
-        max_batches=max_train_batches,
-        seed=seed,
-    )
     val_loader = _setup_dataloader(
         val_dataset,
         total_seq_len,
