@@ -169,3 +169,15 @@ def test_from_flat_accepts_partial_working_dict():
     assert recovered.draft.num_layers == 6
     # Untouched fields fall back to their schema defaults.
     assert recovered.trainer.epochs == 20
+
+
+@pytest.mark.parametrize("limit", [0, 10, None])
+def test_validation_sample_limit_round_trip(limit):
+    cfg = TrainConfig(data={"max_val_samples": limit})
+    assert cfg.data.max_val_samples == limit
+    assert TrainConfig.from_flat(cfg.flatten()) == cfg
+
+
+def test_validation_sample_limit_rejects_negative():
+    with pytest.raises(ValueError):
+        TrainConfig(data={"max_val_samples": -1})

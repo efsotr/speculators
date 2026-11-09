@@ -289,8 +289,9 @@ class DataArgs(_Group):
         "Unset means all rows; oversized limits keep the entire split.",
     )
     max_val_samples: int | None = Field(
-        default=None, gt=0,
+        default=None, ge=0,
         description="Keep only the first N rows of the original validation split. "
+        "Zero disables validation. "
         "Unset means all rows; oversized limits keep the entire split.",
     )
     noise_std: float = Field(

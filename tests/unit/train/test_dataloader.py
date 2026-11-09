@@ -2,6 +2,8 @@
 
 from unittest.mock import Mock
 
+import pytest
+
 from speculators.train import dataloader
 
 
@@ -41,3 +43,37 @@ def test_worker_init_skips_device_binding_without_accelerator(monkeypatch):
     set_num_threads.assert_called_once_with(1)
     is_available.assert_called_once_with()
     set_device_index.assert_not_called()
+
+
+@pytest.mark.parametrize("limit", [0, 10, None])
+def test_validation_limit_controls_loader_construction(monkeypatch, limit):
+    datasets = Mock(side_effect=lambda **kwargs: Mock(split=kwargs["split"]))
+    loaders = Mock(side_effect=lambda dataset, *args, **kwargs: dataset.split)
+    monkeypatch.setattr(dataloader, "ArrowDataset", datasets)
+    monkeypatch.setattr(dataloader, "_setup_dataloader", loaders)
+    train, val = dataloader.create_train_val_loaders(
+        data_path="unused",
+        total_seq_len=8192,
+        hidden_states_dtype=dataloader.torch.bfloat16,
+        vllm_endpoint="",
+        on_missing="raise",
+        verifier_name_or_path="unused",
+        request_timeout=None,
+        max_retries=0,
+        generation_validation_retries=0,
+        max_consecutive_generation_failures=1,
+        hidden_size=8,
+        num_target_layers=1,
+        num_workers=0,
+        prefetch_factor=4,
+        preprocess=None,
+        max_val_samples=limit,
+    )
+    assert train == "train"
+    assert val == (None if limit == 0 else "val")
+    assert [call.kwargs["split"] for call in datasets.call_args_list] == (
+        ["train"] if limit == 0 else ["train", "val"]
+    )
+    assert loaders.call_count == (1 if limit == 0 else 2)
+    if limit != 0:
+        assert datasets.call_args.kwargs["max_samples"] == limit
