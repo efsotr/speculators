@@ -137,8 +137,10 @@ def create_train_val_loaders(
     """
     _limit_worker_threads()
 
-    if not (0.0 < train_data_ratio < 1.0):
-        raise ValueError(f"train_data_ratio must be in (0, 1), got {train_data_ratio}")
+    if not (0.0 < train_data_ratio <= 1.0):
+        raise ValueError(f"train_data_ratio must be in (0, 1], got {train_data_ratio}")
+    if train_data_ratio == 1.0 and max_val_samples != 0:
+        raise ValueError("train_data_ratio=1.0 requires max_val_samples=0")
 
     train_dataset: BaseDataset = ArrowDataset(
         datapath=data_path,

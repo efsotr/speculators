@@ -46,12 +46,13 @@ def test_worker_init_skips_device_binding_without_accelerator(monkeypatch):
 
 
 @pytest.mark.parametrize("limit", [0, 10, None])
-def test_validation_limit_controls_loader_construction(monkeypatch, limit):
+@pytest.mark.parametrize("ratio", [0.95, 1.0, 0.0, 1.1])
+def test_validation_limit_controls_loader_construction(monkeypatch, limit, ratio):
     datasets = Mock(side_effect=lambda **kwargs: Mock(split=kwargs["split"]))
     loaders = Mock(side_effect=lambda dataset, *args, **kwargs: dataset.split)
     monkeypatch.setattr(dataloader, "ArrowDataset", datasets)
     monkeypatch.setattr(dataloader, "_setup_dataloader", loaders)
-    train, val = dataloader.create_train_val_loaders(
+    kwargs = dict(
         data_path="unused",
         total_seq_len=8192,
         hidden_states_dtype=dataloader.torch.bfloat16,
@@ -68,7 +69,16 @@ def test_validation_limit_controls_loader_construction(monkeypatch, limit):
         prefetch_factor=4,
         preprocess=None,
         max_val_samples=limit,
+        train_data_ratio=ratio,
     )
+    if not 0 < ratio <= 1 or (ratio == 1 and limit != 0):
+        with pytest.raises(ValueError, match="train_data_ratio"):
+            dataloader.create_train_val_loaders(**kwargs)
+        datasets.assert_not_called()
+        loaders.assert_not_called()
+        return
+    train, val = dataloader.create_train_val_loaders(**kwargs)
+    assert datasets.call_args_list[0].kwargs["train_ratio"] == ratio
     assert train == "train"
     assert val == (None if limit == 0 else "val")
     assert [call.kwargs["split"] for call in datasets.call_args_list] == (

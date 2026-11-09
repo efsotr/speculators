@@ -279,9 +279,9 @@ class DataArgs(_Group):
         "packing, for both training and validation. Unset preserves prepared lengths.",
     )
     train_data_ratio: float = Field(
-        default=0.9,
+        default=0.9, gt=0.0, le=1.0,
         description="Fraction of the dataset used for training; the remainder is held "
-        "out for validation.",
+        "out for validation. Set 1.0 with max_val_samples=0 to use all rows for training.",
     )
     max_train_samples: int | None = Field(
         default=None, gt=0,
