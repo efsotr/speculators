@@ -11,7 +11,7 @@ from speculators.train.config.resolution import resolve
 
 def test_torch_logging_config_defaults_and_native_overrides(tmp_path):
     defaults = TrainConfig().logging
-    assert defaults.torch_logs == "graph_breaks,recompiles,graph_code"
+    assert defaults.torch_logs == "-all"
     assert defaults.torch_logs_format == "%(artifactprefix)s %(message)s"
     assert defaults.torch_graph_code_dir is None
     config = tmp_path / "config.yaml"

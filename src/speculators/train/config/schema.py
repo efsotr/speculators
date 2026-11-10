@@ -578,7 +578,7 @@ class TrainerArgs(_Group):
 
 class LoggingArgs(_Group):
     torch_logs: str = Field(
-        default="graph_breaks,recompiles,graph_code",
+        default="-all",
         description="PyTorch TORCH_LOGS settings; TORCH_LOGS env takes precedence.",
     )
     torch_logs_format: str = Field(
