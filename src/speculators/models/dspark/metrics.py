@@ -22,6 +22,8 @@ from speculators.losses import (
     LossConfig,
     compound_loss,
     dflash_loss_decay,
+    dpace_dev_loss_decay,
+    dpace_dev_token_probs,
     dpace_loss_decay,
     tv_loss,
 )
@@ -66,6 +68,7 @@ def compute_metrics(
     confidence_head_alpha: float = 1.0,
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
+    dpace_dev_accept_prob: str = "q",
     sample_from_anchor: bool = True,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the DSpark loss and a metrics dict (``*_sum``/``*_total`` pairs)."""
@@ -74,7 +77,18 @@ def compute_metrics(
     seq_len = logits.shape[1]
     pos_idx = (torch.arange(seq_len, device=device) % block_size).unsqueeze(0)
     start_pos = 0 if sample_from_anchor else 1
-    if per_position_loss_weight == "dpace":
+    if per_position_loss_weight == "dpace_dev":
+        q, p = dpace_dev_token_probs(logits, targets)
+        decay_fn = partial(
+            dpace_dev_loss_decay,
+            loss_mask=loss_mask,
+            block_size=block_size,
+            dpace_alpha=dpace_alpha,
+            q=q,
+            p=p,
+            accept_prob=dpace_dev_accept_prob,
+        )
+    elif per_position_loss_weight == "dpace":
         decay_fn = partial(
             dpace_loss_decay,
             loss_mask=loss_mask,

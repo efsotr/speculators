@@ -51,6 +51,45 @@ All [DFlash](dflash.md) backbone parameters also apply. DFlash2 defaults to five
 
 To train your own, see `examples/train/dflash2_qwen3_8b_ultrachat_online_5k.sh`.
 
+## Experimental D-PACE development weighting
+
+`dpace_dev` supports both `loss.loss_fn: kl_div` and `ce` for DFlash/DFlash2.
+The original `dpace` mode still requires CE. Example additions to a DFlash2 YAML:
+
+```yaml
+loss:
+  loss_fn: kl_div
+dflash:
+  per_position_loss_weight: dpace_dev
+  dpace_alpha: 0.5
+  dpace_dev_accept_prob: min_q_p
+```
+
+`--dpace-dev-accept-prob` (YAML `dflash.dpace_dev_accept_prob`) selects:
+
+| Value | Probability before D-PACE smoothing |
+| --- | --- |
+| `q` (default) | q |
+| `p` | p |
+| `min_q_p` | min(q, p) |
+| `p_over_q` | min(1, p/q) |
+| `q_over_p` | min(1, q/p) |
+
+All probabilities refer to the teacher's full-vocabulary argmax token.
+For the unary loss, q and p are its draft and teacher full-vocabulary masses.
+For the selector, q is recomputed from the corrected K-way candidate logits
+(after injecting a missing teacher argmax), while p remains its full-vocabulary
+teacher mass, without renormalizing over the candidates. Thus the two losses
+compute their own weights; selector q never reuses unary q.
+
+The selected probability replaces `exp(-CE)` in the existing D-PACE algorithm.
+Both losses retain the existing smoothing `(1-alpha)*accept + alpha`, mask,
+prefix products, suffix sums, and masked-mean denominator. Probabilities and
+weights are detached: gradients flow only through the weighted KL or CE.
+`dpace_alpha` must be in `(0, 1]`. Ratio denominators clamp to fp32's smallest
+normal positive value; 0/0 evaluates to 0. Probability reductions use fp32.
+No inference changes are required. Project defaults are unchanged.
+
 ## Serving
 
 Checkpoints emitted here follow the public Z Lab weight contract but use a speculators config. They can be served in vLLM using `vllm serve ./checkpoint`.

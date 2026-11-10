@@ -9,6 +9,8 @@ from speculators.losses import (
     LossConfig,
     compound_loss,
     dflash_loss_decay,
+    dpace_dev_loss_decay,
+    dpace_dev_token_probs,
     dpace_loss_decay,
     kl_div_loss,
 )
@@ -29,6 +31,7 @@ def compute_metrics(
     loss_config: LossConfig | None = None,
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
+    dpace_dev_accept_prob: str = "q",
     sample_from_anchor: bool = False,
 ) -> tuple[torch.Tensor, dict]:
     """Compute loss and accuracy metrics for draft model predictions.
@@ -57,7 +60,18 @@ def compute_metrics(
     pos_idx = torch.arange(seq_len, device=logits.device) % block_size
     pos_idx = pos_idx.unsqueeze(0)  # shape: [1, T]
 
-    if per_position_loss_weight == "dpace":
+    if per_position_loss_weight == "dpace_dev":
+        q, p = dpace_dev_token_probs(logits, targets)
+        decay_fn = partial(
+            dpace_dev_loss_decay,
+            loss_mask=loss_mask,
+            block_size=block_size,
+            dpace_alpha=dpace_alpha,
+            q=q,
+            p=p,
+            accept_prob=dpace_dev_accept_prob,
+        )
+    elif per_position_loss_weight == "dpace":
         decay_fn = partial(
             dpace_loss_decay,
             loss_mask=loss_mask,

@@ -444,10 +444,13 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             "gamma": gamma,
             "max_anchors": max_anchors,
             "per_position_loss_weight": per_position_loss_weight,
+            "dpace_dev_accept_prob": kwargs.get("dpace_dev_accept_prob", "q"),
             "dpace_alpha": dpace_alpha,
         }
         train = dict(shared)
-        train["anchor_sampling"] = kwargs.get("anchor_sampling") or {"strategy": "uniform"}
+        train["anchor_sampling"] = kwargs.get("anchor_sampling") or {
+            "strategy": "uniform"
+        }
         val = dict(shared)
         val["anchor_sampling"] = {"strategy": "uniform"}
         return train, val
@@ -760,6 +763,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         max_anchors: int = 512,
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
+        dpace_dev_accept_prob: str = "q",
         **kwargs,
     ):
         _, logits, targets, aligned_loss_mask, _ = self._backbone_forward(
@@ -781,6 +785,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             loss_config=loss_config,
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
+            dpace_dev_accept_prob=dpace_dev_accept_prob,
             sample_from_anchor=self.config.sample_from_anchor,
         )
         metrics.update(getattr(self, "_anchor_sampling_metrics", {}))

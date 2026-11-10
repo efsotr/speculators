@@ -183,9 +183,11 @@ torchrun --standalone --nproc_per_node=4 -m speculators.train \
 
 - **`--dflash-decay-gamma`** (float, default: `4.0`) Decay gamma for DFlash-family loss weighting.
 
-- **`--per-position-loss-weight`** (str, default: `"dpace"` for dflash, `"fixed-exp-decay"` otherwise) Per-position loss weighting scheme. Options: `fixed-exp-decay`, `dpace`. Applies to DFlash-family models. `dpace` requires `--loss-fn ce`.
+- **`--per-position-loss-weight`** (str, default: `"dpace"` for dflash, `"fixed-exp-decay"` otherwise) Per-position loss weighting scheme. Options: `fixed-exp-decay`, `dpace`, `dpace_dev`. `dpace` requires `--loss-fn ce`. `dpace_dev` supports DFlash/DFlash2 with `--loss-fn ce` or `kl_div`.
 
-- **`--dpace-alpha`** (float, default: `0.5`) Confidence smoothing constant for the D-PACE loss. Only used with `--per-position-loss-weight dpace`.
+- **`--dpace-alpha`** (float, default: `0.5`) Confidence smoothing constant for the D-PACE loss. Used with `--per-position-loss-weight dpace` or `dpace_dev`, in `(0, 1]`.
+
+- **`--dpace-dev-accept-prob`** (str, default: `"q"`) Acceptance proxy for `dpace_dev`: `q`, `p`, `min_q_p`, `p_over_q`, or `q_over_p`. See [DFlash2 weighting](../user_guide/algorithms/dflash2.md#experimental-d-pace-development-weighting) for probability definitions.
 
 ### DFlash2-Specific Arguments
 

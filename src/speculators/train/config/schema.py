@@ -619,15 +619,24 @@ class DFlashArgs(_Group):
     dflash_decay_gamma: float = Field(
         default=4.0, description="Decay gamma for DFlash-family loss weighting."
     )
-    per_position_loss_weight: Literal["fixed-exp-decay", "dpace"] | None = Field(
+    per_position_loss_weight: (
+        Literal["fixed-exp-decay", "dpace", "dpace_dev"] | None
+    ) = Field(
         default=None,
-        description="Per-position loss weight option for D-PACE support "
+        description="Per-position loss weighting: fixed-exp-decay, dpace, or "
+        "dpace_dev (DFlash/DFlash2 with CE or KL). "
         "(default: dpace for dflash, fixed-exp-decay otherwise).",
+    )
+    dpace_dev_accept_prob: Literal["q", "p", "min_q_p", "p_over_q", "q_over_p"] = Field(
+        default="q",
+        description="dpace_dev acceptance: q, p, min(q,p), min(1,p/q), "
+        "or min(1,q/p), at the teacher argmax token. Selector q uses corrected "
+        "K-way logits; p always uses the full teacher vocabulary.",
     )
     dpace_alpha: float = Field(
         default=0.5,
         description="Smoothing constant for the D-PACE loss (default: 0.5). Must be in "
-        "(0, 1] when --per-position-loss-weight=dpace.",
+        "(0, 1] for dpace and dpace_dev.",
     )
 
 
@@ -959,14 +968,20 @@ class TrainConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_dpace(self) -> "TrainConfig":
-        """D-PACE per-position loss weighting requires CE loss and a smoothing constant
-        in ``(0, 1]``. Only enforced when actually selected, so it never fires on a
-        default (``fixed-exp-decay``) run."""
-        if self.dflash.per_position_loss_weight == "dpace":
-            if self.loss.loss_fn != "ce":
+        """Validate the objectives and smoothing supported by each D-PACE mode."""
+        if self.dflash.per_position_loss_weight in {"dpace", "dpace_dev"}:
+            if (
+                self.dflash.per_position_loss_weight == "dpace"
+                and self.loss.loss_fn != "ce"
+            ):
                 raise ValueError(
                     "--per-position-loss-weight=dpace requires --loss-fn=ce"
                 )
+            if self.dflash.per_position_loss_weight == "dpace_dev":
+                if self.speculator_type not in {"dflash", "dflash2"}:
+                    raise ValueError("dpace_dev requires dflash or dflash2")
+                if self.loss.loss_fn not in {"ce", "kl_div"}:
+                    raise ValueError("dpace_dev requires loss_fn=ce or kl_div")
             if not 0.0 < self.dflash.dpace_alpha <= 1.0:
                 raise ValueError(
                     f"--dpace-alpha must be in (0, 1], got {self.dflash.dpace_alpha}"

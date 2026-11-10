@@ -84,32 +84,93 @@ def dpace_loss_decay(
         # convert CE to per-position confidence
         q = torch.exp(-elementwise_loss).float()
 
-        # reshape loss to [num_anchors, block_size]
-        # for intra-block cumulative multiplication
-        if q.shape[1] % block_size != 0:
-            raise ValueError(
-                f"q.shape[1] ({q.shape[1]}) must be divisible by "
-                f"block_size ({block_size})"
-            )
-        num_anchors = q.shape[1] // block_size
-        q = q.reshape(num_anchors, block_size)
-        mask = loss_mask.reshape(num_anchors, block_size).to(q.dtype)
+        return _dpace_probability_weights(q, loss_mask, block_size, dpace_alpha)
 
-        # smoothed confidence for numerical stability
-        smooth = (1.0 - dpace_alpha) * q + dpace_alpha
-        smooth = torch.where(mask > 0, smooth, torch.ones_like(smooth))
 
-        # prefix cumulative production
-        prefix = torch.cumprod(smooth, dim=-1)
-
-        # suffix summation: flip -> cumsum -> flip
-        weight = torch.flip(
-            torch.cumsum(torch.flip(prefix * mask, dims=[-1]), dim=-1), dims=[-1]
+def _dpace_probability_weights(
+    q: torch.Tensor,
+    loss_mask: torch.Tensor,
+    block_size: int,
+    dpace_alpha: float,
+) -> torch.Tensor:
+    # reshape loss to [num_anchors, block_size]
+    # for intra-block cumulative multiplication
+    if q.shape[1] % block_size != 0:
+        raise ValueError(
+            f"q.shape[1] ({q.shape[1]}) must be divisible by block_size ({block_size})"
         )
-        weight = weight * mask
+    num_anchors = q.shape[1] // block_size
+    q = q.reshape(num_anchors, block_size)
+    mask = loss_mask.reshape(num_anchors, block_size).to(q.dtype)
+
+    # smoothed confidence for numerical stability
+    smooth = (1.0 - dpace_alpha) * q + dpace_alpha
+    smooth = torch.where(mask > 0, smooth, torch.ones_like(smooth))
+
+    # prefix cumulative production
+    prefix = torch.cumprod(smooth, dim=-1)
+
+    # suffix summation: flip -> cumsum -> flip
+    weight = torch.flip(
+        torch.cumsum(torch.flip(prefix * mask, dims=[-1]), dim=-1), dims=[-1]
+    )
+    weight = weight * mask
 
     # reshape weight
     return weight.reshape(1, -1)
+
+
+@torch.no_grad()
+def dpace_dev_token_probs(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Draft and teacher probabilities at the teacher's full-vocabulary argmax.
+
+    Reduce in fp32 without retaining a full softmax tensor or an autograd graph.
+    """
+    ids = targets.argmax(dim=-1, keepdim=True)
+    q = (
+        logits.gather(-1, ids).squeeze(-1).float() - logits.float().logsumexp(dim=-1)
+    ).exp()
+    p = (
+        targets.gather(-1, ids).squeeze(-1).float() - targets.float().logsumexp(dim=-1)
+    ).exp()
+    return q, p
+
+
+@torch.no_grad()
+def dpace_dev_loss_decay(  # noqa: PLR0917
+    pos_idx: torch.Tensor,  # noqa: ARG001
+    loss_mask: torch.Tensor,
+    block_size: int,
+    dpace_alpha: float,
+    q: torch.Tensor,
+    p: torch.Tensor,
+    accept_prob: str = "q",
+    **_kwargs,
+) -> torch.Tensor:
+    """D-PACE weights with explicit, detached acceptance probabilities.
+
+    q and p refer to the same teacher argmax token. Selector q is recomputed
+    from its corrected K-way logits; p remains the full-vocabulary teacher mass.
+    Ratios clamp the denominator to fp32 tiny (including 0/0 -> 0).
+    """
+    q, p = q.float(), p.float()
+    tiny = torch.finfo(torch.float32).tiny
+    if accept_prob == "q":
+        accept = q
+    elif accept_prob == "p":
+        accept = p
+    elif accept_prob == "min_q_p":
+        accept = torch.minimum(q, p)
+    elif accept_prob == "p_over_q":
+        accept = (p / q.clamp_min(tiny)).clamp(max=1.0)
+    elif accept_prob == "q_over_p":
+        accept = (q / p.clamp_min(tiny)).clamp(max=1.0)
+    else:
+        raise ValueError(f"Unknown dpace_dev accept probability: {accept_prob}")
+    return _dpace_probability_weights(accept, loss_mask, block_size, dpace_alpha)
 
 
 def _fused_kernel(name: str):

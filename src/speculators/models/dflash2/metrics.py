@@ -14,6 +14,7 @@ from torch.nn import functional
 from speculators.losses import (
     LossConfig,
     dflash_loss_decay,
+    dpace_dev_loss_decay,
     dpace_loss_decay,
     loss_function,
     tv_loss,
@@ -83,13 +84,34 @@ def compute_selector_loss(
     per_position_loss_weight: str,
     dpace_alpha: float,
     sample_from_anchor: bool = False,
+    target_probs: torch.Tensor | None = None,
+    dpace_dev_accept_prob: str = "q",
 ) -> torch.Tensor:
     """Compute teacher-forced hard CE over the runtime-sized candidate set."""
     pos_idx = (
         torch.arange(candidate_logits.shape[1], device=candidate_logits.device)
         % block_size
     ).unsqueeze(0)
-    if per_position_loss_weight == "dpace":
+    if per_position_loss_weight == "dpace_dev":
+        if target_probs is None:
+            raise ValueError("dpace_dev selector requires full-vocabulary target_probs")
+        with torch.no_grad():
+            q = (
+                candidate_logits.gather(-1, target_positions.unsqueeze(-1))
+                .squeeze(-1)
+                .float()
+                - candidate_logits.float().logsumexp(dim=-1)
+            ).exp()
+        decay_fn = partial(
+            dpace_dev_loss_decay,
+            loss_mask=loss_mask,
+            block_size=block_size,
+            dpace_alpha=dpace_alpha,
+            q=q,
+            p=target_probs,
+            accept_prob=dpace_dev_accept_prob,
+        )
+    elif per_position_loss_weight == "dpace":
         decay_fn = partial(
             dpace_loss_decay,
             loss_mask=loss_mask,
@@ -130,6 +152,7 @@ def compute_metrics(
     selector_loss_alpha: float = 1.0,
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
+    dpace_dev_accept_prob: str = "q",
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine the unary DFlash objective with a K-way selector objective."""
     unary_loss, metrics = compute_unary_metrics(
@@ -144,16 +167,27 @@ def compute_metrics(
         confidence_head_alpha=0.0,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,
+        dpace_dev_accept_prob=dpace_dev_accept_prob,
         sample_from_anchor=sample_from_anchor,
     )
+    target_probs = None
+    if per_position_loss_weight == "dpace_dev":
+        with torch.no_grad():
+            ids = targets.argmax(dim=-1, keepdim=True)
+            target_probs = (
+                targets.gather(-1, ids).squeeze(-1).float()
+                - targets.float().logsumexp(dim=-1)
+            ).exp()
     selector_loss = compute_selector_loss(
         candidate_logits,
         target_positions,
         loss_mask,
         block_size,
+        target_probs=target_probs,
         gamma=gamma,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,
+        dpace_dev_accept_prob=dpace_dev_accept_prob,
         sample_from_anchor=sample_from_anchor,
     )
     loss = unary_loss + selector_loss_alpha * selector_loss

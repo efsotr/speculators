@@ -117,12 +117,15 @@ class DFlash2DraftModel(DFlashDraftModel):
             "per_position_loss_weight": kwargs.get(
                 "per_position_loss_weight", "fixed-exp-decay"
             ),
+            "dpace_dev_accept_prob": kwargs.get("dpace_dev_accept_prob", "q"),
             "dpace_alpha": kwargs.get("dpace_alpha", 0.5),
             "selector_loss_alpha": kwargs.get("selector_loss_alpha", 1.0),
             "hidden_state_mse_alpha": kwargs.get("hidden_state_mse_alpha", 0.0),
         }
         train = dict(shared)
-        train["anchor_sampling"] = kwargs.get("anchor_sampling") or {"strategy": "uniform"}
+        train["anchor_sampling"] = kwargs.get("anchor_sampling") or {
+            "strategy": "uniform"
+        }
         val = dict(shared)
         val["anchor_sampling"] = {"strategy": "uniform"}
         return train, val
@@ -157,6 +160,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         hidden_state_mse_alpha: float = 0.0,
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
+        dpace_dev_accept_prob: str = "q",
         **kwargs,
     ) -> tuple[None, torch.Tensor, dict[str, Any]]:
         hidden, unary_logits, targets, aligned_loss_mask, block_indices = (
@@ -204,12 +208,15 @@ class DFlash2DraftModel(DFlashDraftModel):
             selector_loss_alpha=selector_loss_alpha,
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
+            dpace_dev_accept_prob=dpace_dev_accept_prob,
         )
         if hidden_state_mse_alpha:
             # Offline last_hidden_states are before the verifier's final norm.
             # Draft `hidden` is after its final norm, so compare the same stage.
             with torch.no_grad():
-                predicted_hidden_states = self.verifier_norm(verifier_last_hidden_states)
+                predicted_hidden_states = self.verifier_norm(
+                    verifier_last_hidden_states
+                )
             mse = predicted_hidden_mse(
                 hidden,
                 predicted_hidden_states,
