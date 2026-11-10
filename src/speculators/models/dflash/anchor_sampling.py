@@ -89,6 +89,8 @@ def select_static_anchors(
 
     A supplied persistent generator controls tie-breaking and selection. When
     absent, torch's global RNG is used; this function never reseeds per batch.
+    High-entropy pools retain at least the requested anchor budget whenever
+    enough legal candidates exist.
     """
     sampling = sampling or {}
     strategy = sampling.get("strategy", "uniform")
@@ -142,6 +144,8 @@ def select_static_anchors(
             if strategy == "entropy_curriculum"
             else math.ceil(pool_size * retain)
         )
+        if strategy == "target_entropy_high":
+            pool_size = min(candidates.numel(), max(num_anchors, pool_size))
         # Stable sort after a random permutation gives exact, unbiased ties.
         perm = torch.randperm(candidates.numel(), device=device, generator=generator)
         descending = strategy not in {"target_entropy_low", "entropy_curriculum"}

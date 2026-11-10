@@ -79,6 +79,19 @@ def test_nonuniform_model_forward_backward_finite(model_type, strategy):
 
 
 @pytest.mark.parametrize("model_type", ["dflash", "dflash2"])
+def test_high_entropy_refills_budget_in_model_training(model_type):
+    model = _model(model_type).train()
+    # 16 legal starts, so retaining half alone would only select 8 anchors.
+    _, loss, metrics = _run(model, _batch(), {
+        "strategy": "target_entropy_high", "retain_fraction": 0.5,
+    }, max_anchors=12)
+    assert metrics["anchor_selected_sum"].item() == 12
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+
+
+@pytest.mark.parametrize("model_type", ["dflash", "dflash2"])
 @pytest.mark.parametrize("supervised", [0, 5])
 def test_empty_or_padded_anchors_have_finite_zero_safe_gradients(model_type, supervised):
     model = _model(model_type).train()

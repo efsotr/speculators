@@ -13,7 +13,7 @@ from speculators.models.dflash.anchor_sampling import (
 
 
 def _select(strategy="uniform", *, length=20, budget=5, retain=1.0, **kwargs):
-    sampling = {"strategy": strategy, "retain_fraction": retain}
+    sampling = {"strategy": strategy, "retain_fraction": retain, "score_backend": "eager"}
     sampling.update(kwargs.pop("sampling", {}))
     hidden = kwargs.pop("hidden", torch.zeros(1, length, 3))
     return select_static_anchors(
@@ -61,8 +61,30 @@ def test_entropy_and_flatness_can_have_opposite_rankings():
 
 def test_scoring_uses_anchor_hidden_not_following_token():
     hidden = torch.tensor([[[0., 0.], [10., 0.], [0., 0.], [10., 0.], [0., 0.], [0., 0.]]])
-    anchors, valid = _select("target_entropy_high", length=6, budget=4, retain=0.5, hidden=hidden)
+    anchors, valid = _select("target_entropy_high", length=6, budget=2, retain=0.5, hidden=hidden)
     assert anchors[valid].tolist() == [0, 2]
+
+
+@pytest.mark.parametrize("candidates", [0, 511, 512, 513, 800, 1025, 2048])
+def test_high_entropy_fills_budget_from_highest_entropy_pool(candidates):
+    # Increasing logit gap gives strictly decreasing entropy with position.
+    length = candidates + 16
+    hidden = torch.zeros(1, length, 2)
+    hidden[0, :, 0] = torch.linspace(0, 6, length)
+    anchors, valid = select_static_anchors(
+        torch.ones(1, length), 512, 16, torch.zeros(1, length, dtype=torch.long),
+        sampling={"strategy": "target_entropy_high", "retain_fraction": 0.5,
+                  "score_backend": "eager"},
+        verifier_last_hidden_states=hidden,
+        verifier_norm=nn.Identity(), verifier_lm_head=nn.Identity(),
+        generator=torch.Generator().manual_seed(7),
+    )
+    selected = anchors[valid]
+    count = min(512, candidates)
+    assert selected.numel() == selected.unique().numel() == count
+    assert (selected < min(candidates, max(512, (candidates + 1) // 2))).all()
+    assert torch.equal(selected, selected.sort().values)
+    assert (anchors[~valid] == 0).all()
 
 
 def test_low_entropy_reverses_order():
