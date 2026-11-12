@@ -38,6 +38,28 @@ torchrun --standalone --nproc_per_node=4 -m speculators.train \
   --fsdp-shard
 ```
 
+## Saving on shutdown
+
+`--shutdown-mode finish_batch` is the default (`trainer.shutdown_mode` in YAML).
+On SIGINT or SIGTERM, training finishes the active batch, including every
+optimizer update, scheduler update and the global step increment, then saves
+`<save_path>/interrupted` and returns without starting another batch. Distributed
+ranks exchange the shutdown request at each batch boundary so that a signal to
+one rank also stops the others at the same boundary. This adds one scalar
+all-reduce per batch in distributed training.
+
+Use `--shutdown-mode immediate` to retain the previous behavior: interrupt the
+current operation and attempt checkpoint saving immediately. This can capture
+partially updated optimizer/model state. Both modes retain the 120-second save
+watchdog and restore the original signal handlers before saving.
+
+Signals received outside a training batch wait until the next checked boundary
+(before training or after validation). `finish_batch` cannot escape a stuck batch;
+use `immediate` when immediate interruption matters. SIGKILL (`kill -9`) cannot
+be handled. Launcher or scheduler force-kill deadlines still apply while waiting
+for a batch or saving. The `interrupted` checkpoint keeps its existing manual
+rename requirement for resumption.
+
 ## Arguments
 
 ### Model Arguments

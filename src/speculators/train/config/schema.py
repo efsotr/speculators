@@ -506,6 +506,11 @@ class SchedulerArgs(_Group):
 
 
 class TrainerArgs(_Group):
+    shutdown_mode: Literal["finish_batch", "immediate"] = Field(
+        default="finish_batch",
+        description="On SIGINT/SIGTERM, finish the current batch update before saving "
+        "(default), or immediately interrupt and attempt saving.",
+    )
     ddp_python_reducer: bool = Field(
         default=False,
         description="Use the Python DDP reducer with compiled autograd and whole-forward "

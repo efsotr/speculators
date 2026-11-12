@@ -186,6 +186,7 @@ class TrainerConfig(NamedTuple):
     fsdp_sharding_strategy: Literal["no_shard", "full_shard"] = "full_shard"
     fsdp_reshard_after_forward: bool = True
     gradient_checkpointing: bool = False
+    shutdown_mode: Literal["finish_batch", "immediate"] = "finish_batch"
     max_steps: int | None = None
     ddp_compile_optimizer: bool = True
     ddp_python_reducer: bool = False
@@ -550,6 +551,14 @@ class Trainer:
             )
         return skip_steps
 
+    def _check_shutdown_boundary(self):
+        handler = getattr(self, "_shutdown_handler", None)
+        if handler is not None:
+            handler.check_boundary(
+                distributed=self.is_distributed,
+                device=self.local_rank if self.is_distributed else None,
+            )
+
     def train_epoch(
         self,
         epoch: int,
@@ -582,6 +591,7 @@ class Trainer:
         wall_step_started = time.perf_counter()
         memory_profile = CudaMemoryProfile(self.local_rank, "train", epoch)
         compile_cleanup = CompileCycleCleanup(self.device_type, "train")
+        self._check_shutdown_boundary()
         for local_step_rel, batch in enumerate(train_loader, 1):
             # local_step is 1-based index into the *full* epoch (not the slice).
             local_step = local_step_rel + skip_steps
@@ -694,6 +704,7 @@ class Trainer:
                           seconds=time.perf_counter() - wall_step_started)
             memory_profile.record(self.global_step, batch)
             self.global_step += 1
+            self._check_shutdown_boundary()
             if step_callback is not None:
                 step_callback()
 
@@ -897,6 +908,7 @@ class Trainer:
             if self.is_distributed:
                 dist.barrier()
 
+            self._check_shutdown_boundary()
             self.maybe_update_best(epoch, val_metrics)
 
             if self.is_distributed:

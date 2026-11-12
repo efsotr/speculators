@@ -5,19 +5,10 @@ When Ctrl+C is pressed during training:
 - In single-GPU mode, the process receives SIGINT directly
 
 This module handles both cases by registering handlers for SIGINT and SIGTERM.
-The first signal raises a TrainingInterruptedError exception that unwinds the call
-stack -- this works even when a process is stuck in a NCCL collective, data
-loading, or a GPU kernel. The exception is caught at the run_training level
-to attempt a checkpoint save.
-
-Key design decisions:
-- The handler only raises in the process that called install() (tracked via
-  PID). Forked dataloader workers inherit the handler but ignore the signal,
-  preventing worker crashes.
-- After the first signal, subsequent rapid re-sends (torchrun sends SIGINT
-  to the process group AND then again directly to each child) are silently
-  ignored. Default handlers are restored explicitly before the save attempt,
-  so a deliberate second Ctrl+C during the save will force immediate exit.
+The default finish_batch mode records the request and raises only at a coordinated
+training boundary, after optimizer/scheduler updates. immediate mode raises from
+the signal handler. Forked loader workers ignore signals; repeated requests are
+ignored until handlers are restored before checkpoint saving.
 """
 
 import logging
@@ -26,6 +17,9 @@ import signal
 import threading
 from functools import wraps
 from typing import Any
+
+import torch
+import torch.distributed as dist
 
 logger = logging.getLogger("speculators")
 
@@ -40,12 +34,17 @@ class TrainingInterruptedError(Exception):
 class GracefulShutdownHandler:
     """Manages graceful shutdown with checkpoint saving on interrupt.
 
-    First interrupt: raises TrainingInterruptedError to break out of stuck code.
+    First interrupt: requests shutdown; immediate mode raises from the handler.
     Subsequent rapid signals (from torchrun re-sends): silently ignored.
     After restore(): default handlers are active, so another Ctrl+C kills.
     """
 
-    def __init__(self, timeout: int = DEFAULT_SHUTDOWN_TIMEOUT):
+    def __init__(
+        self, timeout: int = DEFAULT_SHUTDOWN_TIMEOUT, mode: str = "finish_batch"
+    ):
+        if mode not in ("finish_batch", "immediate"):
+            raise ValueError(f"Unknown shutdown mode: {mode}")
+        self.mode = mode
         self._interrupted = False
         self._lock = threading.Lock()
         self._original_sigint: Any = None
@@ -109,10 +108,22 @@ class GracefulShutdownHandler:
                 return
             self._interrupted = True
             logger.warning(
-                f"Received {sig_name} — interrupting training to save checkpoint. "
-                "Send again to force immediate exit."
+                "Received %s — shutdown requested (%s).", sig_name, self.mode
             )
-            raise TrainingInterruptedError(sig_name)
+            if self.mode == "immediate":
+                raise TrainingInterruptedError(sig_name)
+
+    def check_boundary(self, *, distributed: bool = False, device=None):
+        """Agree on shutdown across ranks before any rank enters checkpoint save."""
+        if self.mode != "finish_batch":
+            return
+        requested = self._interrupted
+        if distributed:
+            flag = torch.tensor(int(requested), device=device, dtype=torch.int32)
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+            requested = bool(flag.item())
+        if requested:
+            raise TrainingInterruptedError("batch boundary")
 
     @property
     def timeout(self) -> int:
@@ -132,7 +143,12 @@ def with_graceful_shutdown(
     def decorator(fn):
         @wraps(fn)
         def wrapper(self, *args, **kwargs):
-            handler = GracefulShutdownHandler(timeout=timeout)
+            mode = getattr(
+                getattr(self, "config", None), "shutdown_mode", "finish_batch"
+            )
+            handler = GracefulShutdownHandler(timeout=timeout, mode=mode)
+            previous = getattr(self, "_shutdown_handler", None)
+            self._shutdown_handler = handler
             handler.install()
 
             try:
@@ -173,6 +189,7 @@ def with_graceful_shutdown(
                 # longer-lived process a later interrupt then entered a handler
                 # belonging to a training run that had already ended.
                 handler.restore()
+                self._shutdown_handler = previous
 
         return wrapper
 
