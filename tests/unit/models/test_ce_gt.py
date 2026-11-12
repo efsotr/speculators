@@ -135,9 +135,9 @@ def test_project_dspark_configs():
     if not (root / "scripts/dspark").exists():
         pytest.skip("Project configs unavailable outside parent repository")
     expected = {
-        "default_ce": {"ce": 0.1, "tv": 1.8},
-        "ce_gt": {"ce_gt": 1.0},
-        "kl": {"kl_div": 1.0},
+        "default_ce_tv": {"ce": 0.1, "tv": 1.8},
+        "ce_gt_tv": {"ce_gt": 0.1, "tv": 1.8},
+        "kl_tv": {"kl_div": 0.1, "tv": 1.8},
     }
     configs = []
     for suffix, terms in expected.items():
@@ -147,6 +147,8 @@ def test_project_dspark_configs():
         cfg = TrainConfig.model_validate(raw)
         resolved = resolve_loss_config(cfg.loss.loss_fn)
         assert {name: weight for name, (_, weight) in resolved.items()} == terms
+        assert cfg.optimizer.weight_decay == 0.0
+        assert cfg.optimizer.lr == 6e-4
         configs.append(cfg.model_dump())
     for cfg in configs:
         for group, key in [
