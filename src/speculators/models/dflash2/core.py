@@ -222,8 +222,16 @@ class DFlash2DraftModel(DFlashDraftModel):
             dpace_dev_accept_prob=dpace_dev_accept_prob,
             dpace_token_source=dpace_token_source,
             data_token_ids=(
-                self._aligned_data_token_ids(input_ids, block_indices)
-                if dpace_token_source == "data" else None  # noqa: S105
+                self._aligned_data_token_ids(
+                    input_ids,
+                    block_indices,
+                    require_full_vocab="ce_gt" in (loss_config or {}),
+                )
+                if (
+                    dpace_token_source == "data"  # noqa: S105
+                    or "ce_gt" in (loss_config or {})
+                )
+                else None
             ),
         )
         if hidden_state_mse_alpha:

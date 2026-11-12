@@ -112,7 +112,9 @@ def compute_metrics(
         )
 
     loss, term_losses = compound_loss(
-        logits, targets, loss_mask, pos_idx, loss_config=loss_config, decay_fn=decay_fn
+        logits, targets, loss_mask, pos_idx,
+        loss_config=loss_config, decay_fn=decay_fn,
+        data_token_ids=data_token_ids,
     )
 
     # Analytical per-position acceptance rate = distributional overlap

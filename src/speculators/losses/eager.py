@@ -115,6 +115,15 @@ def ce_loss(
     return elementwise_loss  # noqa: RET504
 
 
+def ce_gt_loss(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+    """Per-position CE against aligned dataset token IDs, computed in fp32."""
+    return torch.nn.functional.cross_entropy(
+        logits.float().reshape(-1, logits.shape[-1]),
+        target_ids.reshape(-1),
+        reduction="none",
+    ).reshape(logits.shape[:-1])
+
+
 def tv_loss(
     logits: torch.Tensor,  # shape: [1, seq_len, draft_vocab_size]
     targets: torch.Tensor,  # shape: [1, seq_len, draft_vocab_size]

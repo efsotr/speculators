@@ -207,6 +207,10 @@ def ce_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return _fused_kernel("fused_ce_loss")(logits, targets)
 
 
+def ce_gt_loss(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+    return _fused_kernel("fused_ce_gt_loss")(logits, target_ids)
+
+
 def tv_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return _fused_kernel("fused_tv_loss")(logits, targets)
 
@@ -228,6 +232,7 @@ _FUSED_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "rkl": reverse_kl_div_loss,
     "jsd": js_div_loss,
     "ce": ce_loss,
+    "ce_gt": ce_gt_loss,
     "tv": tv_loss,
     "nla": neg_log_acceptance_loss,
     "lk_hybrid": lk_hybrid_loss,
@@ -239,6 +244,7 @@ _EAGER_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "rkl": eager.reverse_kl_div_loss,
     "jsd": eager.js_div_loss,
     "ce": eager.ce_loss,
+    "ce_gt": eager.ce_gt_loss,
     "tv": eager.tv_loss,
     "nla": eager.neg_log_acceptance_loss,
     "lk_hybrid": eager.lk_hybrid_loss,
@@ -304,6 +310,8 @@ def compound_loss(
     pos_idx: torch.Tensor,
     loss_config: LossConfig,
     decay_fn: Callable[..., torch.Tensor] | None = None,
+    *,
+    data_token_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute a weighted sum of loss terms.
 
@@ -319,9 +327,17 @@ def compound_loss(
     term_losses: dict[str, torch.Tensor] = {}
     multi = len(loss_config) > 1
     for name, (fn, weight) in loss_config.items():
+        term_targets = targets
+        if name == "ce_gt":
+            if data_token_ids is None:
+                raise ValueError("ce_gt requires aligned data_token_ids")
+            if data_token_ids.shape != logits.shape[:-1]:
+                raise ValueError("ce_gt data_token_ids must match logits positions")
+            # Masked positions may contain padding/sentinel IDs. Never gather them.
+            term_targets = torch.where(loss_mask.bool(), data_token_ids, 0)
         term = loss_function(
             logits,
-            targets,
+            term_targets,
             loss_mask,
             pos_idx,
             loss_fn=fn,
@@ -345,7 +361,7 @@ def loss_function(
 
     Args:
         logits: Draft model logits.
-        targets: Target model logits.
+        targets: Teacher logits, or aligned dataset token IDs for ce_gt.
         loss_mask: Boolean mask selecting positions to include in the loss.
         pos_idx: Position indices within each speculative block.
         loss_fn: Per-position loss function (default: kl_div_loss).

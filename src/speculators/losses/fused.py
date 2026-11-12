@@ -84,6 +84,7 @@ _OP_RKL = tl.constexpr(1)
 _OP_JSD = tl.constexpr(2)
 _OP_CE = tl.constexpr(3)
 _OP_TV = tl.constexpr(4)
+_OP_CE_GT = tl.constexpr(5)
 
 # stats [_N_STATS, n_rows]: [0]/[1] draft row max / sum-exp, [2]/[3] same for
 # targets (unused by ce), [4] per-OP -- kl_div/rkl: row loss L | jsd:
@@ -176,14 +177,20 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
     """
     pid = tl.program_id(0).to(tl.int64)
     logits_ptr += pid * n_cols
-    targets_ptr += pid * n_cols
+    if OP != _OP_CE_GT:
+        targets_ptr += pid * n_cols
 
     m_d, z_d = _online_stats(logits_ptr, n_cols, BLOCK_SIZE)
     lse_d = m_d + tl.log(z_d)
     tl.store(stats_ptr + 0 * stats_row + pid, m_d)
     tl.store(stats_ptr + 1 * stats_row + pid, z_d)
 
-    if OP == _OP_CE:
+    if OP == _OP_CE_GT:
+        target_idx = tl.load(targets_ptr + pid).to(tl.int32)
+        logit_at_target = tl.load(logits_ptr + target_idx).cast(tl.float32)
+        tl.store(loss_ptr + pid, lse_d - logit_at_target)
+        tl.store(stats_ptr + 4 * stats_row + pid, target_idx.to(tl.float32))
+    elif OP == _OP_CE:
         # Only the target argmax is needed; no target softmax stats.
         best_val = float("-inf")
         best_idx = 0
@@ -359,13 +366,17 @@ class _FusedLoss(torch.autograd.Function):
     def forward(ctx, logits, targets, op):
         B, T, V = logits.shape
         logits_flat = logits.contiguous().view(B * T, V)
-        targets_flat = targets.contiguous().view(B * T, V)
+        targets_flat = targets.contiguous().view(
+            B * T if op == _OP_CE_GT.value else (B * T, V)
+        )
         loss, stats = _loss_forward(logits_flat, targets_flat, op)
+        # Both CE variants share the same cached-ID backward.
+        backward_op = _OP_CE.value if op == _OP_CE_GT.value else op
         # CE backward only needs the target argmax cached in stats.
         ctx.save_for_backward(
-            logits_flat, None if op == _OP_CE.value else targets_flat, stats
+            logits_flat, None if backward_op == _OP_CE.value else targets_flat, stats
         )
-        ctx.op = op
+        ctx.op = backward_op
         ctx.shape = (B, T, V)
         return loss.view(B, T)
 
@@ -424,3 +435,8 @@ def fused_lk_hybrid_loss(logits, targets, eta: float = 3.0):
     tv = fused_tv_loss(logits, targets)
     weight = torch.exp(-eta * (1.0 - tv).detach())
     return weight * kl + (1.0 - weight) * tv
+
+
+def fused_ce_gt_loss(logits, target_ids):
+    """Per-position CE against integer IDs, without a dense one-hot target."""
+    return _FusedLoss.apply(logits, target_ids, _OP_CE_GT.value)

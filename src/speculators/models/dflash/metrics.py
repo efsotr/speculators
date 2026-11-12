@@ -102,6 +102,7 @@ def compute_metrics(
         pos_idx,
         loss_config=loss_config,
         decay_fn=decay_fn,
+        data_token_ids=data_token_ids,
     )
 
     pred_ids = torch.argmax(logits, dim=-1)

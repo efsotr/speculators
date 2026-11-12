@@ -18,6 +18,7 @@ speculators train ... --loss-fn kl_div
 | `rkl`       | Reverse KL, draft to target            | Mode-seeking: the draft concentrates on the target's dominant modes.           |
 | `jsd`       | Jensen-Shannon divergence              | Symmetric, bounded by `log 2`. Balances forward and reverse KL.                |
 | `ce`        | Cross-entropy against `argmax p`       | Hard labels from the target. Required by `--per-position-loss-weight dpace`.   |
+| `ce_gt`     | Cross-entropy against dataset token IDs | DFlash, DFlash2 unary, DSpark; requires the full verifier vocabulary. |
 | `tv`        | Total variation, `1 - alpha`           | Optimizes the acceptance rate directly. Gradients vanish when overlap is low.  |
 | `nla`       | Negative log-acceptance, `-log(alpha)` | TV's target with a `1 / alpha` gradient boost, so it trains from a cold start. |
 | `lk_hybrid` | Adaptive KL/TV blend                   | `lambda * KL + (1 - lambda) * TV` with `lambda = exp(-3 * alpha)`, detached.   |
@@ -42,3 +43,27 @@ speculators train ... --loss-fn '{"ce": 0.1, "tv": 0.9}'
 
 - Lin, "Divergence measures based on the Shannon entropy" (1991) -- Jensen-Shannon divergence
 - Samarin et al., ["LK Losses: Direct Acceptance Rate Optimization for Speculative Decoding"](https://arxiv.org/abs/2602.23881) -- `nla` and `lk_hybrid`
+
+## Dataset ground-truth CE
+
+`--loss-fn ce_gt` uses integer token IDs from the training data instead of
+`argmax` of the teacher logits. It supports both `fused` and `eager` implementations,
+including weighted combinations such as `'{"ce_gt": 0.1, "tv": 1.8}'`.
+For anchor `a`, slot `k` uses dataset token `a+k+1` when
+`sample_from_anchor=true`, otherwise `a+k`. Alignment reuses the backbone's sampled
+block indices; invalid/document-boundary/padded positions remain excluded by the
+existing loss mask. The fused kernel computes `logsumexp(logits)-logits[target_id]`
+in fp32 and reuses CE backward (`softmax-onehot`), without a dense one-hot tensor.
+
+Only the `ce_gt` term consumes dataset IDs. Teacher-distribution losses, confidence
+overlap targets, accuracy metrics and the DFlash2 selector objective retain their
+existing targets. Position decay and mask-count normalization are unchanged.
+Original D-PACE also accepts standalone `ce_gt` (confidence is the probability of
+the dataset token); `dpace_dev` retains its independent token-source setting.
+Models with a reduced draft vocabulary reject `ce_gt` rather than silently
+interpreting verifier IDs as draft IDs.
+
+DeepSpec DSpark's `0.1 CE + 0.9 L1` corresponds to `0.1 ce_gt + 1.8 tv` in
+per-token objectives. This does not make the complete training loss identical:
+DeepSpec normalizes by globally summed decayed mask weights, whereas the local
+implementation normalizes by each rank's undecayed mask count.

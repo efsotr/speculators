@@ -208,5 +208,14 @@ class DSparkDraftModel(DFlashDraftModel):
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
             sample_from_anchor=self.config.sample_from_anchor,
+            data_token_ids=(
+                self._aligned_data_token_ids(
+                    input_ids,
+                    anchored_block_indices,
+                    require_full_vocab="ce_gt" in (loss_config or {}),
+                )
+                if "ce_gt" in (loss_config or {})
+                else None
+            ),
         )
         return None, loss, metrics

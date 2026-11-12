@@ -2,6 +2,7 @@
 
 from speculators.losses.utils import (
     LossConfig,
+    ce_gt_loss,
     ce_loss,
     compound_loss,
     dflash_loss_decay,
@@ -21,6 +22,7 @@ from speculators.losses.utils import (
 
 __all__ = [
     "LossConfig",
+    "ce_gt_loss",
     "ce_loss",
     "compound_loss",
     "dflash_loss_decay",

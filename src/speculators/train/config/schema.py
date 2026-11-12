@@ -425,7 +425,8 @@ class LossArgs(_Group):
     )
     loss_fn: str | None = Field(
         default=None,
-        description="Loss function specification. A name (kl_div, rkl, jsd, ce, tv, "
+        description="Loss function specification. A name "
+        "(kl_div, rkl, jsd, ce, ce_gt, tv, "
         'nla, lk_hybrid) or a JSON dict for a weighted combination, e.g. \'{"ce": 0.1, '
         '"tv": 0.9}\'. (default: "ce" for dflash, \'{"ce": 0.1, "tv": 0.9}\' for '
         'xpress, "kl_div" otherwise).',
@@ -1005,20 +1006,25 @@ class TrainConfig(BaseSettings):
         if self.dflash.per_position_loss_weight in {"dpace", "dpace_dev"}:
             if (
                 self.dflash.per_position_loss_weight == "dpace"
-                and self.loss.loss_fn != "ce"
+                and self.loss.loss_fn not in {"ce", "ce_gt"}
             ):
                 raise ValueError(
-                    "--per-position-loss-weight=dpace requires --loss-fn=ce"
+                    "--per-position-loss-weight=dpace requires --loss-fn=ce or ce_gt"
                 )
             if self.dflash.per_position_loss_weight == "dpace_dev":
                 if self.speculator_type not in {"dflash", "dflash2"}:
                     raise ValueError("dpace_dev requires dflash or dflash2")
-                if self.loss.loss_fn not in {"ce", "kl_div"}:
-                    raise ValueError("dpace_dev requires loss_fn=ce or kl_div")
+                if self.loss.loss_fn not in {"ce", "ce_gt", "kl_div"}:
+                    raise ValueError("dpace_dev requires loss_fn=ce, ce_gt or kl_div")
             if not 0.0 < self.dflash.dpace_alpha <= 1.0:
                 raise ValueError(
                     f"--dpace-alpha must be in (0, 1], got {self.dflash.dpace_alpha}"
                 )
+        if (
+            "ce_gt" in resolve_loss_config(self.loss.loss_fn)
+            and self.speculator_type not in {"dflash", "dflash2", "dspark"}
+        ):
+            raise ValueError("ce_gt requires dflash, dflash2 or dspark")
         return self
 
     @model_validator(mode="after")

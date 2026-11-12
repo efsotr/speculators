@@ -640,8 +640,12 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             })
         return anchors, valid
 
-    def _aligned_data_token_ids(self, input_ids, block_indices):
+    def _aligned_data_token_ids(
+        self, input_ids, block_indices, *, require_full_vocab=False
+    ):
         """Align dataset tokens with teacher logits: same slot or next token."""
+        if require_full_vocab and self.use_draft_vocab:
+            raise ValueError("ce_gt requires full verifier vocabulary")
         if self.config.sample_from_anchor:
             input_ids = torch.roll(input_ids, -1, dims=1)
         return input_ids[:, block_indices]
@@ -796,8 +800,16 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             dpace_dev_accept_prob=dpace_dev_accept_prob,
             dpace_token_source=dpace_token_source,
             data_token_ids=(
-                self._aligned_data_token_ids(input_ids, block_indices)
-                if dpace_token_source == "data" else None  # noqa: S105
+                self._aligned_data_token_ids(
+                    input_ids,
+                    block_indices,
+                    require_full_vocab="ce_gt" in (loss_config or {}),
+                )
+                if (
+                    dpace_token_source == "data"  # noqa: S105
+                    or "ce_gt" in (loss_config or {})
+                )
+                else None
             ),
             sample_from_anchor=self.config.sample_from_anchor,
         )
