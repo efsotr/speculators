@@ -10,7 +10,7 @@ from torch.nn.functional import cross_entropy
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Config
 
 from speculators.losses import compound_loss, resolve_loss_config
-from speculators.losses.eager import ce_gt_loss, tv_loss
+from speculators.losses.eager import ce_gt_loss, ce_loss, tv_loss
 from speculators.models.dflash.core import DFlashDraftModel
 from speculators.models.dflash.metrics import compute_metrics as dflash_metrics
 from speculators.models.dspark.config import DSparkSpeculatorConfig
@@ -19,6 +19,20 @@ from speculators.models.dspark.metrics import compute_metrics as dspark_metrics
 from speculators.train.config import TrainConfig
 
 pytestmark = pytest.mark.smoke
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_eager_ce_gt_matches_ce_dtype_and_gradient(dtype):
+    torch.manual_seed(274)
+    logits = torch.randn(1, 8, 17, dtype=dtype, requires_grad=True)
+    teacher = torch.randn_like(logits)
+    actual = ce_gt_loss(logits, teacher.argmax(-1))
+    expected = ce_loss(logits, teacher)
+    assert actual.dtype == expected.dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    actual_grad = torch.autograd.grad(actual.sum(), logits)[0]
+    expected_grad = torch.autograd.grad(expected.sum(), logits)[0]
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("model_type", ["dflash", "dflash2", "dspark"])
@@ -121,7 +135,9 @@ def test_fused_ce_gt_value_gradient_and_compile(dtype, vocab, compiled):
     if compiled:
         fused = torch.compile(fused, fullgraph=True, backend="inductor")
     actual = fused(logits, ids)
-    expected = ce_gt_loss(logits, ids)
+    expected = cross_entropy(
+        logits.float().reshape(-1, vocab), ids.reshape(-1), reduction="none"
+    ).reshape(ids.shape)
     torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
     upstream = torch.randn_like(actual)
     upstream[:, ::3] = 0

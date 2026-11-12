@@ -116,9 +116,9 @@ def ce_loss(
 
 
 def ce_gt_loss(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
-    """Per-position CE against aligned dataset token IDs, computed in fp32."""
+    """Per-position CE against aligned dataset token IDs, matching ce_loss dtype."""
     return torch.nn.functional.cross_entropy(
-        logits.float().reshape(-1, logits.shape[-1]),
+        logits.reshape(-1, logits.shape[-1]),
         target_ids.reshape(-1),
         reduction="none",
     ).reshape(logits.shape[:-1])

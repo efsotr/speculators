@@ -47,8 +47,10 @@ speculators train ... --loss-fn '{"ce": 0.1, "tv": 0.9}'
 ## Dataset ground-truth CE
 
 `--loss-fn ce_gt` uses integer token IDs from the training data instead of
-`argmax` of the teacher logits. It supports both `fused` and `eager` implementations,
-including weighted combinations such as `'{"ce_gt": 0.1, "tv": 1.8}'`.
+`argmax` of the teacher logits. It supports both `fused` and `eager` implementations.
+The eager implementation follows `ce` input/autocast dtype without an explicit
+fp32 logits conversion. Both fused CE variants retain fp32 internal statistics.
+It supports weighted combinations such as `'{"ce_gt": 0.1, "tv": 1.8}'`.
 For anchor `a`, slot `k` uses dataset token `a+k+1` when
 `sample_from_anchor=true`, otherwise `a+k`. Alignment reuses the backbone's sampled
 block indices; invalid/document-boundary/padded positions remain excluded by the
