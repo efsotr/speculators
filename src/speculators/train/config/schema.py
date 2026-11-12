@@ -56,6 +56,11 @@ class _Group(BaseModel):
 
 
 class VerifierArgs(_Group):
+    verifier_attn_impl: Literal["flash_attention_2"] = Field(
+        default="flash_attention_2",
+        description="Attention implementation for the online/online_gpu target model. "
+        "Packed online features currently require FlashAttention 2.",
+    )
     verifier_name_or_path: str = Field(
         default="",
         description="Path or HF id of the verifier/target model.",

@@ -84,18 +84,21 @@ class OnlineTransfer(HiddenStatesTransfer):
             dtype = getattr(torch, dtype, None)
         if dtype != torch.bfloat16:
             raise ValueError('packed online FlashAttention 2 requires hidden_states_dtype: bfloat16')
+        attn_impl = getattr(self.args, 'verifier_attn_impl', 'flash_attention_2')
+        if attn_impl != 'flash_attention_2':
+            raise ValueError('packed online features require verifier_attn_impl: flash_attention_2')
         # Import failures must surface; do not silently fall back to SDPA/eager.
         from flash_attn import flash_attn_varlen_func  # noqa: F401
         from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
 
         # HF explicitly requires eager kernel registration before fullgraph capture.
-        lazy_import_flash_attention('flash_attention_2')
+        lazy_import_flash_attention(attn_impl)
 
         device = torch.device('cuda', int(os.environ.get('LOCAL_RANK', 0)))
         data = load_from_disk(self.data_path).with_format('torch')
         model = AutoModel.from_pretrained(
             self.args.verifier_name_or_path, dtype=dtype,
-            attn_implementation='flash_attention_2', local_files_only=True,
+            attn_implementation=attn_impl, local_files_only=True,
         ).to(device).eval().requires_grad_(False)
         feature_forward = PackedQwen3Features(model, self.layer_ids).eval()
         if getattr(self.args, 'online_compile_hidden_states', True):

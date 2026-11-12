@@ -148,7 +148,8 @@ def test_cpu_online_loader_keeps_pinned_memory(tmp_path):
 
 @pytest.mark.parametrize('compile_setting', [None, True, False],
                          ids=['default-compiled', 'compiled', 'eager'])
-def test_online_setup_compile_switch_preserves_fa2(monkeypatch, compile_setting):
+@pytest.mark.parametrize('attn_impl', [None, 'flash_attention_2'])
+def test_online_setup_compile_switch_preserves_fa2(monkeypatch, compile_setting, attn_impl):
     """Disabling teacher compilation must keep packed FA2 and frozen weights."""
     import datasets
     import transformers
@@ -176,6 +177,8 @@ def test_online_setup_compile_switch_preserves_fa2(monkeypatch, compile_setting)
     monkeypatch.setenv('LOCAL_RANK', '0')
     args = SimpleNamespace(target_layer_ids=[0, 1],
                            verifier_name_or_path='local-qwen3')
+    if attn_impl is not None:
+        args.verifier_attn_impl = attn_impl
     if compile_setting is not None:
         args.online_compile_hidden_states = compile_setting
     transfer = OnlineTransfer(args, 'prepared')
@@ -198,7 +201,7 @@ def test_online_setup_compile_switch_preserves_fa2(monkeypatch, compile_setting)
         assert isinstance(compile_fn.call_args.args[0], PackedQwen3Features)
         assert compile_fn.call_args.kwargs == {
             'backend': 'inductor', 'fullgraph': True, 'dynamic': True,
-            'options': {'emulate_precision_casts': True},
+            'options': {'emulate_precision_casts': False},
         }
         assert transfer.feature_forward is compile_fn.return_value
     # Repeated setup must reuse the loaded model and selected execution path.

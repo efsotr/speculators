@@ -193,6 +193,8 @@ rename requirement for resumption.
 
 ### Attention Backend Arguments
 
+- **`--verifier-attn-impl`** (str, default: `"flash_attention_2"`) Target attention implementation for `online`/`online_gpu` hidden-state features. Currently only `flash_attention_2` is supported for packed forwards. YAML: `verifier.verifier_attn_impl`.
+
 - **`--draft-attn-impl`** (str, default: `"simple_flex_attention"`) Attention implementation for draft layers. Options: `simple_flex_attention`, `sdpa`, `eager`. Use `sdpa` or `eager` on hardware where flex attention is unavailable (e.g. Ascend NPU). Applies to Eagle3, P-EAGLE, and DFlash-family models. Not supported for MTP.
 
 ### DFlash-Specific Arguments
