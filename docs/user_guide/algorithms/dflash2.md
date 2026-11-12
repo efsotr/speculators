@@ -75,6 +75,7 @@ dflash:
 | `min_q_p` | min(q, p) |
 | `p_over_q` | min(1, p/q) |
 | `q_over_p` | min(1, q/p) |
+| `tv` | sum_i min(p_i, q_i), equivalently 1-TV |
 
 `--dpace-token-source` (YAML `dflash.dpace_token_source`) selects the token
 used for both q and p: `teacher_argmax` (framework default) uses the teacher's
@@ -113,3 +114,7 @@ The architecture follows Z Lab's [DFlash2 implementation](https://github.com/z-l
 - [DFlash](dflash.md) -- The block-parallel draft backbone
 - [DSpark](dspark.md) -- Adds a Markov head and confidence scheduling
 - [Train a Speculator](../tutorials/train.md) -- End-to-end training workflow
+
+For `tv`, unary uses full-vocabulary overlap. Selector uses the original top-K
+corrected distribution (q=0 outside K) against full-vocabulary teacher probabilities,
+without renormalizing teacher mass in K. Token source does not affect this mode.

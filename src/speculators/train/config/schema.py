@@ -220,8 +220,12 @@ class AnchorSamplingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy: Literal[
-        "uniform", "target_flatness", "target_entropy_high", "target_entropy_low",
-        "entropy_curriculum", "round_occupancy",
+        "uniform",
+        "target_flatness",
+        "target_entropy_high",
+        "target_entropy_low",
+        "entropy_curriculum",
+        "round_occupancy",
     ] = "uniform"
     retain_fraction: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
     curriculum_preset: Literal["paper", "github"] = "paper"
@@ -233,15 +237,23 @@ class AnchorSamplingConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_policy_fields(self) -> "AnchorSamplingConfig":
-        if self.strategy not in {
-            "target_flatness", "target_entropy_high", "target_entropy_low",
-        } and self.retain_fraction != 1.0:
+        if (
+            self.strategy
+            not in {
+                "target_flatness",
+                "target_entropy_high",
+                "target_entropy_low",
+            }
+            and self.retain_fraction != 1.0
+        ):
             raise ValueError("retain_fraction applies only to static ranked sampling")
         if self.strategy != "entropy_curriculum" and self.curriculum_preset != "paper":
             raise ValueError("curriculum_preset applies only to entropy_curriculum")
         if self.strategy == "round_occupancy":
             if self.proposal is None or self.target is None:
-                raise ValueError("round_occupancy requires explicit proposal and target")
+                raise ValueError(
+                    "round_occupancy requires explicit proposal and target"
+                )
         elif self.proposal is not None or self.target is not None:
             raise ValueError("proposal and target apply only to round_occupancy")
         return self
@@ -274,28 +286,35 @@ class DataArgs(_Group):
         default=8192, description="Maximum training sequence length, in tokens."
     )
     max_sample_seq_len: int | None = Field(
-        default=None, gt=0,
+        default=None,
+        gt=0,
         description="Right-truncate each sample to at most this many tokens before "
         "packing, for both training and validation. Unset preserves prepared lengths.",
     )
     train_data_ratio: float = Field(
-        default=0.9, gt=0.0, le=1.0,
+        default=0.9,
+        gt=0.0,
+        le=1.0,
         description="Fraction of the dataset used for training; the remainder is held "
         "out for validation. Set 1.0 with max_val_samples=0 to use all rows for training.",
     )
     max_train_samples: int | None = Field(
-        default=None, gt=0,
+        default=None,
+        gt=0,
         description="Keep only the first N rows of the original training split. "
         "Unset means all rows; oversized limits keep the entire split.",
     )
     max_val_samples: int | None = Field(
-        default=None, ge=0,
+        default=None,
+        ge=0,
         description="Keep only the first N rows of the original validation split. "
         "Zero disables validation. "
         "Unset means all rows; oversized limits keep the entire split.",
     )
     noise_std: float = Field(
-        default=0.0, ge=0.0, le=0.0,
+        default=0.0,
+        ge=0.0,
+        le=0.0,
         description="Compatibility setting: v0.9 removed noise augmentation; only zero is supported.",
     )
     packing_seed: int | None = Field(
@@ -494,7 +513,9 @@ class TrainerArgs(_Group):
         json_schema_extra=_CLI_BOOL_OPTIONAL,
     )
     ddp_bucket_cap_mb: float | None = Field(
-        default=None, gt=0.0, allow_inf_nan=False,
+        default=None,
+        gt=0.0,
+        allow_inf_nan=False,
         description="DDP reducer and Dynamo DDPOptimizer bucket capacity in MiB. "
         "Unset preserves PyTorch's 25 MiB default and smaller first bucket.",
     )
@@ -507,12 +528,15 @@ class TrainerArgs(_Group):
         default="default", description="DFlash-family forward torch.compile mode."
     )
     activation_memory_budget: float = Field(
-        default=0.99, ge=0.0, le=1.0,
+        default=0.99,
+        ge=0.0,
+        le=1.0,
         description="DFlash-family torch._functorch activation partitioner memory budget (0–1).",
     )
     emulate_precision_casts: bool = Field(
-        default=False, description="Preserve eager low-precision rounding for DFlash-family "
-        "draft compilation and the online verifier."
+        default=False,
+        description="Preserve eager low-precision rounding for DFlash-family "
+        "draft compilation and the online verifier.",
     )
     epochs: int = Field(default=20, description="Number of training epochs.")
     checkpoint_freq: float = Field(
@@ -633,10 +657,13 @@ class DFlashArgs(_Group):
         "dataset token. "
         "Selector q is zero outside the original unary top-K candidates.",
     )
-    dpace_dev_accept_prob: Literal["q", "p", "min_q_p", "p_over_q", "q_over_p"] = Field(
+    dpace_dev_accept_prob: Literal[
+        "q", "p", "min_q_p", "p_over_q", "q_over_p", "tv"
+    ] = Field(
         default="q",
         description="dpace_dev acceptance: q, p, min(q,p), min(1,p/q), "
-        "or min(1,q/p), at the dpace_token_source token. Selector q uses corrected "
+        "or min(1,q/p), at the dpace_token_source token; tv uses distributional "
+        "overlap (1-TV) independently of token source. Selector q uses corrected "
         "K-way logits; p always uses the full teacher vocabulary.",
     )
     dpace_alpha: float = Field(
@@ -1030,7 +1057,9 @@ class TrainConfig(BaseSettings):
             group = getattr(self, gname)
             for fname in type(group).model_fields:
                 value = getattr(group, fname)
-                values[fname] = value.model_dump() if isinstance(value, BaseModel) else value
+                values[fname] = (
+                    value.model_dump() if isinstance(value, BaseModel) else value
+                )
         values.update(self._backend_args)
         return values
 

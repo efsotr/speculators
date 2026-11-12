@@ -166,7 +166,7 @@ def test_cpu_inductor_fullgraph_forward_backward(mode):
     torch.testing.assert_close(actual_grad, reference_grad, atol=1e-6, rtol=1e-5)
 
 
-@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("mode", (*MODES, "tv"))
 def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
     torch.manual_seed(74)
     unary = torch.randn(1, 8, 7, requires_grad=True)
@@ -198,12 +198,21 @@ def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
         dpace_candidate_logits=selector,
     )
     q, p = dpace_dev_token_probs(unary.detach(), teacher)
-    unary_weights = _reference(q, p, mask, 4, 0.5, mode)
+    if mode == "tv":
+        q = torch.minimum(unary.detach().softmax(-1), teacher.softmax(-1)).sum(-1)
+    unary_weights = _reference(q, p, mask, 4, 0.5, "q" if mode == "tv" else mode)
     matches = (
         unary.detach().topk(3, dim=-1).indices.eq(teacher.argmax(-1).unsqueeze(-1))
     )
     selector_q = (selector.detach().softmax(-1) * matches).sum(-1)
-    selector_weights = _reference(selector_q, p, mask, 4, 0.5, mode)
+    if mode == "tv":
+        full_q = torch.zeros_like(teacher).scatter(
+            -1, unary.detach().topk(3, dim=-1).indices, selector.detach().softmax(-1)
+        )
+        selector_q = 1.0 - 0.5 * (full_q - teacher.softmax(-1)).abs().sum(-1)
+    selector_weights = _reference(
+        selector_q, p, mask, 4, 0.5, "q" if mode == "tv" else mode
+    )
     ce = torch.nn.functional.cross_entropy(
         selector.flatten(0, -2), positions.flatten(), reduction="none"
     ).reshape_as(mask)
@@ -223,7 +232,7 @@ def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
 
 
 @pytest.mark.parametrize("source", ["teacher_argmax", "data"])
-@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("mode", (*MODES, "tv"))
 @pytest.mark.parametrize("loss_name", ["ce", "kl_div"])
 def test_cli_roundtrip_and_dflash2_trainer_kwargs(mode, loss_name, source):
     cfg = TrainConfig.resolve(
@@ -327,7 +336,7 @@ def _combined_loss(  # noqa: PLR0917
 
 
 @pytest.mark.parametrize("source", ["teacher_argmax", "data"])
-@pytest.mark.parametrize("mode", ["q", "p_over_q"])
+@pytest.mark.parametrize("mode", ["q", "p_over_q", "tv"])
 def test_dflash2_cpu_inductor_fullgraph_forward_backward(mode, source):
     torch.manual_seed(75)
     unary = torch.randn(1, 8, 7, requires_grad=True)

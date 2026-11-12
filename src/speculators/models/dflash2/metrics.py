@@ -86,6 +86,7 @@ def compute_selector_loss(
     sample_from_anchor: bool = False,
     target_probs: torch.Tensor | None = None,
     draft_probs: torch.Tensor | None = None,
+    selector_overlap: torch.Tensor | None = None,
     dpace_dev_accept_prob: str = "q",
 ) -> torch.Tensor:
     """Compute teacher-forced hard CE over the runtime-sized candidate set."""
@@ -106,6 +107,7 @@ def compute_selector_loss(
             q=draft_probs,
             p=target_probs,
             accept_prob=dpace_dev_accept_prob,
+            overlap=selector_overlap,
         )
     elif per_position_loss_weight == "dpace":
         decay_fn = partial(
@@ -172,6 +174,7 @@ def compute_metrics(
         dpace_dev_accept_prob=dpace_dev_accept_prob,
         sample_from_anchor=sample_from_anchor,
     )
+    selector_overlap = None
     target_probs = None
     draft_probs = None
     if per_position_loss_weight == "dpace_dev":
@@ -184,6 +187,14 @@ def compute_metrics(
                 raise ValueError(
                     "dpace_dev selector requires original candidate IDs and logits"
                 )
+            if dpace_dev_accept_prob == "tv":
+                # q has zero mass outside the original serving candidates.
+                q_candidates = dpace_candidate_logits.float().softmax(-1)
+                p_candidates = (
+                    targets.gather(-1, dpace_candidate_ids).float()
+                    - targets.float().logsumexp(-1, keepdim=True)
+                ).exp()
+                selector_overlap = torch.minimum(q_candidates, p_candidates).sum(-1)
             matches = dpace_candidate_ids.eq(ids)
             draft_probs = (dpace_candidate_logits.float().softmax(-1) * matches).sum(-1)
             target_probs = (
@@ -197,6 +208,7 @@ def compute_metrics(
         block_size,
         target_probs=target_probs,
         draft_probs=draft_probs,
+        selector_overlap=selector_overlap,
         gamma=gamma,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,

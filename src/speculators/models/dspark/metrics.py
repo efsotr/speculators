@@ -87,6 +87,8 @@ def compute_metrics(
             targets,
             data_token_ids if dpace_token_source == "data" else None,  # noqa: S105
         )
+        with torch.no_grad():
+            tv = tv_loss_fn(logits, targets) if dpace_dev_accept_prob == "tv" else None
         decay_fn = partial(
             dpace_dev_loss_decay,
             loss_mask=loss_mask,
@@ -95,6 +97,7 @@ def compute_metrics(
             q=q,
             p=p,
             accept_prob=dpace_dev_accept_prob,
+            overlap=None if tv is None else 1.0 - tv,
         )
     elif per_position_loss_weight == "dpace":
         decay_fn = partial(

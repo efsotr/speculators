@@ -149,6 +149,7 @@ def dpace_dev_loss_decay(  # noqa: PLR0917
     q: torch.Tensor,
     p: torch.Tensor,
     accept_prob: str = "q",
+    overlap: torch.Tensor | None = None,
     **_kwargs,
 ) -> torch.Tensor:
     """D-PACE weights with explicit, detached acceptance probabilities.
@@ -159,7 +160,11 @@ def dpace_dev_loss_decay(  # noqa: PLR0917
     """
     q, p = q.float(), p.float()
     tiny = torch.finfo(torch.float32).tiny
-    if accept_prob == "q":
+    if accept_prob == "tv":
+        if overlap is None:
+            raise ValueError("tv acceptance requires per-position sum(min(p_i, q_i))")
+        accept = overlap.float().clamp(0.0, 1.0)
+    elif accept_prob == "q":
         accept = q
     elif accept_prob == "p":
         accept = p
