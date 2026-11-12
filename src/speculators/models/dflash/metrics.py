@@ -33,6 +33,8 @@ def compute_metrics(
     dpace_alpha: float = 0.5,
     dpace_dev_accept_prob: str = "q",
     sample_from_anchor: bool = False,
+    dpace_token_source: str = "teacher_argmax",  # noqa: S107
+    data_token_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """Compute loss and accuracy metrics for draft model predictions.
 
@@ -61,7 +63,13 @@ def compute_metrics(
     pos_idx = pos_idx.unsqueeze(0)  # shape: [1, T]
 
     if per_position_loss_weight == "dpace_dev":
-        q, p = dpace_dev_token_probs(logits, targets)
+        if dpace_token_source == "data" and data_token_ids is None:  # noqa: S105
+            raise ValueError("dpace_token_source=data requires aligned data_token_ids")
+        q, p = dpace_dev_token_probs(
+            logits,
+            targets,
+            data_token_ids if dpace_token_source == "data" else None,  # noqa: S105
+        )
         decay_fn = partial(
             dpace_dev_loss_decay,
             loss_mask=loss_mask,

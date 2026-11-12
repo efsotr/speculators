@@ -1,6 +1,7 @@
 """Small numerical and compilation checks for D-PACE development weights."""
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -13,6 +14,8 @@ from speculators.losses.utils import (
     dpace_dev_token_probs,
     dpace_loss_decay,
 )
+from speculators.models.dflash.core import DFlashDraftModel
+from speculators.models.dflash.metrics import compute_metrics as compute_dflash_metrics
 from speculators.models.dflash2.core import DFlash2DraftModel
 from speculators.models.dflash2.metrics import (
     compute_metrics,
@@ -191,11 +194,16 @@ def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
         per_position_loss_weight="dpace_dev",
         dpace_alpha=0.5,
         dpace_dev_accept_prob=mode,
+        dpace_candidate_ids=unary.detach().topk(3, dim=-1).indices,
+        dpace_candidate_logits=selector,
     )
     q, p = dpace_dev_token_probs(unary.detach(), teacher)
     unary_weights = _reference(q, p, mask, 4, 0.5, mode)
-    selector_q = selector.detach().softmax(-1).gather(-1, positions.unsqueeze(-1))
-    selector_weights = _reference(selector_q.squeeze(-1), p, mask, 4, 0.5, mode)
+    matches = (
+        unary.detach().topk(3, dim=-1).indices.eq(teacher.argmax(-1).unsqueeze(-1))
+    )
+    selector_q = (selector.detach().softmax(-1) * matches).sum(-1)
+    selector_weights = _reference(selector_q, p, mask, 4, 0.5, mode)
     ce = torch.nn.functional.cross_entropy(
         selector.flatten(0, -2), positions.flatten(), reduction="none"
     ).reshape_as(mask)
@@ -214,9 +222,10 @@ def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
         assert torch.isfinite(actual).all()
 
 
+@pytest.mark.parametrize("source", ["teacher_argmax", "data"])
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("loss_name", ["ce", "kl_div"])
-def test_cli_roundtrip_and_dflash2_trainer_kwargs(mode, loss_name):
+def test_cli_roundtrip_and_dflash2_trainer_kwargs(mode, loss_name, source):
     cfg = TrainConfig.resolve(
         [
             "--verifier-name-or-path",
@@ -231,6 +240,8 @@ def test_cli_roundtrip_and_dflash2_trainer_kwargs(mode, loss_name):
             "dpace_dev",
             "--dpace-dev-accept-prob",
             mode,
+            "--dpace-token-source",
+            source,
             "--dpace-alpha",
             "0.3",
         ]
@@ -244,6 +255,7 @@ def test_cli_roundtrip_and_dflash2_trainer_kwargs(mode, loss_name):
     )
     train, val = DFlash2DraftModel.get_trainer_kwargs(**cfg.flatten())
     for kwargs in (train, val):
+        assert kwargs["dpace_token_source"] == source
         assert kwargs["dpace_dev_accept_prob"] == mode
         assert kwargs["per_position_loss_weight"] == "dpace_dev"
         assert kwargs["dpace_alpha"] == pytest.approx(0.3)
@@ -290,7 +302,7 @@ def test_schema_rejects_unsupported_dpace_dev_losses(loss_name):
 
 
 def _combined_loss(  # noqa: PLR0917
-    unary, teacher, selector, candidates, positions, contains, mask, mode
+    unary, teacher, selector, candidates, positions, contains, mask, mode, source
 ):
     loss, _ = compute_metrics(
         unary,
@@ -306,12 +318,17 @@ def _combined_loss(  # noqa: PLR0917
         tv_loss_fn=tv_loss,
         per_position_loss_weight="dpace_dev",
         dpace_dev_accept_prob=mode,
+        dpace_candidate_ids=unary.detach().topk(3, dim=-1).indices,
+        dpace_candidate_logits=selector,
+        dpace_token_source=source,
+        data_token_ids=(teacher.argmax(-1) + 1) % teacher.shape[-1],
     )
     return loss
 
 
+@pytest.mark.parametrize("source", ["teacher_argmax", "data"])
 @pytest.mark.parametrize("mode", ["q", "p_over_q"])
-def test_dflash2_cpu_inductor_fullgraph_forward_backward(mode):
+def test_dflash2_cpu_inductor_fullgraph_forward_backward(mode, source):
     torch.manual_seed(75)
     unary = torch.randn(1, 8, 7, requires_grad=True)
     teacher = torch.randn_like(unary)
@@ -320,7 +337,17 @@ def test_dflash2_cpu_inductor_fullgraph_forward_backward(mode):
         unary.detach().topk(3, dim=-1).indices, teacher.argmax(-1)
     )
     mask = torch.tensor([[0.0, 1, 1, 1, 0, 1, 1, 0]])
-    args = (unary, teacher, selector, candidates, positions, contains, mask, mode)
+    args = (
+        unary,
+        teacher,
+        selector,
+        candidates,
+        positions,
+        contains,
+        mask,
+        mode,
+        source,
+    )
     expected = _combined_loss(*args)
     expected_grads = torch.autograd.grad(expected, (unary, selector))
     compiled = torch.compile(_combined_loss, fullgraph=True, backend="inductor")
@@ -329,3 +356,144 @@ def test_dflash2_cpu_inductor_fullgraph_forward_backward(mode):
     torch.testing.assert_close(actual, expected)
     for actual_grad, expected_grad in zip(actual_grads, expected_grads, strict=True):
         torch.testing.assert_close(actual_grad, expected_grad, atol=1e-6, rtol=1e-5)
+
+
+def test_data_token_probabilities_use_dataset_ids():
+    draft = torch.tensor([[[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]]], requires_grad=True)
+    teacher = -draft.detach()
+    ids = torch.tensor([[1, 2]])
+    q, p = dpace_dev_token_probs(draft, teacher, ids)
+    torch.testing.assert_close(
+        q, draft.detach().softmax(-1).gather(-1, ids[..., None]).squeeze(-1)
+    )
+    torch.testing.assert_close(
+        p, teacher.softmax(-1).gather(-1, ids[..., None]).squeeze(-1)
+    )
+    assert not q.requires_grad
+    assert not p.requires_grad
+
+
+@pytest.mark.parametrize("source", ["teacher_argmax", "data"])
+@pytest.mark.parametrize("mode", MODES)
+def test_selector_original_candidates_and_selected_token(source, mode):
+    # Teacher token 3 is injected into training candidates, but absent at serving.
+    unary = torch.tensor(
+        [[[3.0, 2.0, 1.0, 0.0], [3.0, 2.0, 1.0, 0.0]]], requires_grad=True
+    )
+    teacher = torch.tensor([[[0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 2.0, 3.0]]])
+    original_ids = torch.tensor([[[0, 1], [0, 1]]])
+    original_logits = torch.tensor([[[0.0, 2.0], [2.0, 0.0]]], requires_grad=True)
+    training_ids, positions, contains = selector_training_candidates(
+        original_ids, teacher.argmax(-1)
+    )
+    training_logits = torch.tensor([[[4.0, 1.0], [1.0, 4.0]]], requires_grad=True)
+    data_ids = torch.tensor([[1, 2]])  # present then absent, neither is teacher argmax
+    mask = torch.ones(1, 2)
+
+    def run(u, t, s, o):
+        return compute_metrics(
+            u,
+            t,
+            training_ids,
+            s,
+            positions,
+            contains,
+            mask,
+            2,
+            2,
+            loss_config=resolve_loss_config("kl_div", "eager"),
+            tv_loss_fn=tv_loss,
+            per_position_loss_weight="dpace_dev",
+            dpace_dev_accept_prob=mode,
+            dpace_token_source=source,
+            data_token_ids=data_ids,
+            dpace_candidate_ids=original_ids,
+            dpace_candidate_logits=o,
+        )[0]
+
+    ids = data_ids if source == "data" else teacher.argmax(-1)
+    q, p = dpace_dev_token_probs(unary, teacher, ids)
+    selector_q = (
+        torch.tensor([[math.exp(2) / (1 + math.exp(2)), 0.0]])
+        if source == "data"
+        else torch.zeros(1, 2)
+    )
+    unary_expected = (
+        kl_div_loss(unary, teacher) * _reference(q, p, mask, 2, 0.5, mode)
+    ).sum() / (mask.sum() + 1e-5)
+    ce = torch.nn.functional.cross_entropy(
+        training_logits.flatten(0, -2), positions.flatten(), reduction="none"
+    ).reshape_as(mask)
+    selector_expected = (ce * _reference(selector_q, p, mask, 2, 0.5, mode)).sum() / (
+        mask.sum() + 1e-5
+    )
+    expected = unary_expected + selector_expected
+    actual = run(unary, teacher, training_logits, original_logits)
+    torch.testing.assert_close(actual, expected)
+    grads = torch.autograd.grad(
+        actual, (unary, training_logits, original_logits), allow_unused=True
+    )
+    assert grads[2] is None  # acceptance probabilities are detached
+
+
+def test_token_source_schema_default_and_invalid():
+    assert (
+        TrainConfig.model_validate(
+            {"speculator_type": "dflash2"}
+        ).dflash.dpace_token_source
+        == "teacher_argmax"
+    )
+    with pytest.raises(ValueError):
+        TrainConfig.model_validate(
+            {"speculator_type": "dflash2", "dflash": {"dpace_token_source": "bad"}}
+        )
+
+
+@pytest.mark.parametrize("sample_from_anchor", [False, True])
+def test_dataset_tokens_align_with_teacher_prediction_slots(sample_from_anchor):
+    model = SimpleNamespace(
+        config=SimpleNamespace(sample_from_anchor=sample_from_anchor)
+    )
+    ids = torch.tensor([[10, 11, 12, 13, 14, 15]])
+    blocks = torch.tensor([0, 1, 3, 4])
+    actual = DFlashDraftModel._aligned_data_token_ids(model, ids, blocks)
+    expected = [[11, 12, 14, 15]] if sample_from_anchor else [[10, 11, 13, 14]]
+    torch.testing.assert_close(actual, torch.tensor(expected))
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_dflash_data_token_weights_and_gradients(mode):
+    torch.manual_seed(76)
+    draft = torch.randn(1, 4, 5, requires_grad=True)
+    teacher = torch.randn_like(draft)
+    ids = (teacher.argmax(-1) + 1) % 5
+    mask = torch.tensor([[0.0, 1.0, 1.0, 1.0]])
+    actual, _ = compute_dflash_metrics(
+        draft,
+        teacher,
+        mask,
+        4,
+        loss_config=resolve_loss_config("kl_div", "eager"),
+        per_position_loss_weight="dpace_dev",
+        dpace_dev_accept_prob=mode,
+        dpace_token_source="data",
+        data_token_ids=ids,
+    )
+    q, p = dpace_dev_token_probs(draft, teacher, ids)
+    weights = _reference(q, p, mask, 4, 0.5, mode)
+    expected = (kl_div_loss(draft, teacher) * weights * mask).sum() / (
+        mask.sum() + 1e-5
+    )
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual, draft, retain_graph=True)[0],
+        torch.autograd.grad(expected, draft)[0],
+    )
+    train, val = DFlashDraftModel.get_trainer_kwargs(
+        loss_fn="kl_div",
+        loss_implementation="eager",
+        per_position_loss_weight="dpace_dev",
+        dpace_token_source="data",
+    )
+    assert train["dpace_token_source"] == "data"
+    assert val["dpace_token_source"] == "data"

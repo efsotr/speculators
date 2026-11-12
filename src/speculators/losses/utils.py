@@ -124,12 +124,13 @@ def _dpace_probability_weights(
 def dpace_dev_token_probs(
     logits: torch.Tensor,
     targets: torch.Tensor,
+    token_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Draft and teacher probabilities at the teacher's full-vocabulary argmax.
+    """Draft and teacher probabilities at supplied IDs (default: teacher argmax).
 
     Reduce in fp32 without retaining a full softmax tensor or an autograd graph.
     """
-    ids = targets.argmax(dim=-1, keepdim=True)
+    ids = (targets.argmax(dim=-1) if token_ids is None else token_ids).unsqueeze(-1)
     q = (
         logits.gather(-1, ids).squeeze(-1).float() - logits.float().logsumexp(dim=-1)
     ).exp()
@@ -152,7 +153,7 @@ def dpace_dev_loss_decay(  # noqa: PLR0917
 ) -> torch.Tensor:
     """D-PACE weights with explicit, detached acceptance probabilities.
 
-    q and p refer to the same teacher argmax token. Selector q is recomputed
+    q and p refer to the same selected token. Selector q is recomputed
     from its corrected K-way logits; p remains the full-vocabulary teacher mass.
     Ratios clamp the denominator to fp32 tiny (including 0/0 -> 0).
     """

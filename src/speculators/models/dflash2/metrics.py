@@ -85,6 +85,7 @@ def compute_selector_loss(
     dpace_alpha: float,
     sample_from_anchor: bool = False,
     target_probs: torch.Tensor | None = None,
+    draft_probs: torch.Tensor | None = None,
     dpace_dev_accept_prob: str = "q",
 ) -> torch.Tensor:
     """Compute teacher-forced hard CE over the runtime-sized candidate set."""
@@ -93,21 +94,16 @@ def compute_selector_loss(
         % block_size
     ).unsqueeze(0)
     if per_position_loss_weight == "dpace_dev":
-        if target_probs is None:
-            raise ValueError("dpace_dev selector requires full-vocabulary target_probs")
-        with torch.no_grad():
-            q = (
-                candidate_logits.gather(-1, target_positions.unsqueeze(-1))
-                .squeeze(-1)
-                .float()
-                - candidate_logits.float().logsumexp(dim=-1)
-            ).exp()
+        if target_probs is None or draft_probs is None:
+            raise ValueError(
+                "dpace_dev selector requires full-vocabulary p and original K-way q"
+            )
         decay_fn = partial(
             dpace_dev_loss_decay,
             loss_mask=loss_mask,
             block_size=block_size,
             dpace_alpha=dpace_alpha,
-            q=q,
+            q=draft_probs,
             p=target_probs,
             accept_prob=dpace_dev_accept_prob,
         )
@@ -153,6 +149,10 @@ def compute_metrics(
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
     dpace_dev_accept_prob: str = "q",
+    dpace_token_source: str = "teacher_argmax",  # noqa: S107
+    data_token_ids: torch.Tensor | None = None,
+    dpace_candidate_ids: torch.Tensor | None = None,
+    dpace_candidate_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine the unary DFlash objective with a K-way selector objective."""
     unary_loss, metrics = compute_unary_metrics(
@@ -165,15 +165,27 @@ def compute_metrics(
         tv_loss_fn=tv_loss_fn,
         gamma=gamma,
         confidence_head_alpha=0.0,
+        dpace_token_source=dpace_token_source,
+        data_token_ids=data_token_ids,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,
         dpace_dev_accept_prob=dpace_dev_accept_prob,
         sample_from_anchor=sample_from_anchor,
     )
     target_probs = None
+    draft_probs = None
     if per_position_loss_weight == "dpace_dev":
         with torch.no_grad():
-            ids = targets.argmax(dim=-1, keepdim=True)
+            token_ids = (
+                data_token_ids if dpace_token_source == "data" else targets.argmax(-1)  # noqa: S105
+            )
+            ids = token_ids.unsqueeze(-1)
+            if dpace_candidate_ids is None or dpace_candidate_logits is None:
+                raise ValueError(
+                    "dpace_dev selector requires original candidate IDs and logits"
+                )
+            matches = dpace_candidate_ids.eq(ids)
+            draft_probs = (dpace_candidate_logits.float().softmax(-1) * matches).sum(-1)
             target_probs = (
                 targets.gather(-1, ids).squeeze(-1).float()
                 - targets.float().logsumexp(dim=-1)
@@ -184,6 +196,7 @@ def compute_metrics(
         loss_mask,
         block_size,
         target_probs=target_probs,
+        draft_probs=draft_probs,
         gamma=gamma,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,

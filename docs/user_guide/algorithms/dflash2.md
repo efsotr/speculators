@@ -63,6 +63,7 @@ dflash:
   per_position_loss_weight: dpace_dev
   dpace_alpha: 0.5
   dpace_dev_accept_prob: min_q_p
+  dpace_token_source: teacher_argmax  # or data
 ```
 
 `--dpace-dev-accept-prob` (YAML `dflash.dpace_dev_accept_prob`) selects:
@@ -75,12 +76,21 @@ dflash:
 | `p_over_q` | min(1, p/q) |
 | `q_over_p` | min(1, q/p) |
 
-All probabilities refer to the teacher's full-vocabulary argmax token.
-For the unary loss, q and p are its draft and teacher full-vocabulary masses.
-For the selector, q is recomputed from the corrected K-way candidate logits
-(after injecting a missing teacher argmax), while p remains its full-vocabulary
-teacher mass, without renormalizing over the candidates. Thus the two losses
-compute their own weights; selector q never reuses unary q.
+`--dpace-token-source` (YAML `dflash.dpace_token_source`) selects the token
+used for both q and p: `teacher_argmax` (framework default) uses the teacher's
+full-vocabulary argmax; `data` uses the dataset token aligned to that prediction.
+With `sample_from_anchor: false` this is the token at the block position; with
+`true` it is the next dataset token. This only changes D-PACE weights: unary
+KL/CE targets and selector CE labels remain teacher-derived.
+
+For the unary loss, q and p are the selected token's draft and teacher
+full-vocabulary probabilities. For the selector, q is recomputed from corrected
+logits over the **original unary top-K**, before any teacher-token injection.
+If the selected token is absent, q is zero (including for `teacher_argmax`).
+p always remains its full-vocabulary teacher probability. Selector training CE
+still uses the teacher-injected candidate set; the two losses compute separate,
+detached weights. A zero q does not necessarily give zero weight because the
+chosen acceptance formula and D-PACE smoothing still apply.
 
 The selected probability replaces `exp(-CE)` in the existing D-PACE algorithm.
 Both losses retain the existing smoothing `(1-alpha)*accept + alpha`, mask,

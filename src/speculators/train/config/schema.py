@@ -627,10 +627,16 @@ class DFlashArgs(_Group):
         "dpace_dev (DFlash/DFlash2 with CE or KL). "
         "(default: dpace for dflash, fixed-exp-decay otherwise).",
     )
+    dpace_token_source: Literal["teacher_argmax", "data"] = Field(
+        default="teacher_argmax",
+        description="Token used for dpace_dev q/p: teacher argmax or aligned "
+        "dataset token. "
+        "Selector q is zero outside the original unary top-K candidates.",
+    )
     dpace_dev_accept_prob: Literal["q", "p", "min_q_p", "p_over_q", "q_over_p"] = Field(
         default="q",
         description="dpace_dev acceptance: q, p, min(q,p), min(1,p/q), "
-        "or min(1,q/p), at the teacher argmax token. Selector q uses corrected "
+        "or min(1,q/p), at the dpace_token_source token. Selector q uses corrected "
         "K-way logits; p always uses the full teacher vocabulary.",
     )
     dpace_alpha: float = Field(

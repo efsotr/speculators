@@ -118,6 +118,7 @@ class DFlash2DraftModel(DFlashDraftModel):
                 "per_position_loss_weight", "fixed-exp-decay"
             ),
             "dpace_dev_accept_prob": kwargs.get("dpace_dev_accept_prob", "q"),
+            "dpace_token_source": kwargs.get("dpace_token_source", "teacher_argmax"),
             "dpace_alpha": kwargs.get("dpace_alpha", 0.5),
             "selector_loss_alpha": kwargs.get("selector_loss_alpha", 1.0),
             "hidden_state_mse_alpha": kwargs.get("hidden_state_mse_alpha", 0.0),
@@ -161,6 +162,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
+        dpace_token_source: str = "teacher_argmax",  # noqa: S107
         **kwargs,
     ) -> tuple[None, torch.Tensor, dict[str, Any]]:
         hidden, unary_logits, targets, aligned_loss_mask, block_indices = (
@@ -191,6 +193,13 @@ class DFlash2DraftModel(DFlashDraftModel):
             training_candidate_ids,
         )
 
+        dpace_candidate_logits = None
+        if per_position_loss_weight == "dpace_dev":
+            with torch.no_grad():
+                dpace_candidate_logits = self.candidate_selector.score_candidates(
+                    unary_logits, hidden, predecessor_ids.reshape(1, -1), candidate_ids
+                )
+
         loss, metrics = compute_metrics(
             unary_logits=unary_logits,
             targets=targets,
@@ -201,6 +210,8 @@ class DFlash2DraftModel(DFlashDraftModel):
             loss_mask=aligned_loss_mask,
             block_size=self.block_size,
             top_k=self.candidate_selector.top_k,
+            dpace_candidate_ids=candidate_ids,
+            dpace_candidate_logits=dpace_candidate_logits,
             sample_from_anchor=self.config.sample_from_anchor,
             loss_config=loss_config or _DEFAULT_LOSS_CONFIG,
             tv_loss_fn=tv_loss_fn,
@@ -209,6 +220,11 @@ class DFlash2DraftModel(DFlashDraftModel):
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
             dpace_dev_accept_prob=dpace_dev_accept_prob,
+            dpace_token_source=dpace_token_source,
+            data_token_ids=(
+                self._aligned_data_token_ids(input_ids, block_indices)
+                if dpace_token_source == "data" else None  # noqa: S105
+            ),
         )
         if hidden_state_mse_alpha:
             # Offline last_hidden_states are before the verifier's final norm.

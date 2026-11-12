@@ -445,6 +445,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             "max_anchors": max_anchors,
             "per_position_loss_weight": per_position_loss_weight,
             "dpace_dev_accept_prob": kwargs.get("dpace_dev_accept_prob", "q"),
+            "dpace_token_source": kwargs.get("dpace_token_source", "teacher_argmax"),
             "dpace_alpha": dpace_alpha,
         }
         train = dict(shared)
@@ -639,6 +640,12 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             })
         return anchors, valid
 
+    def _aligned_data_token_ids(self, input_ids, block_indices):
+        """Align dataset tokens with teacher logits: same slot or next token."""
+        if self.config.sample_from_anchor:
+            input_ids = torch.roll(input_ids, -1, dims=1)
+        return input_ids[:, block_indices]
+
     def _backbone_forward(
         self,
         hidden_states: torch.Tensor,  # [1, total_seq_len, num_hidden*hidden_size]
@@ -764,9 +771,10 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
+        dpace_token_source: str = "teacher_argmax",  # noqa: S107
         **kwargs,
     ):
-        _, logits, targets, aligned_loss_mask, _ = self._backbone_forward(
+        _, logits, targets, aligned_loss_mask, block_indices = self._backbone_forward(
             hidden_states,
             input_ids,
             loss_mask,
@@ -786,6 +794,11 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             per_position_loss_weight=per_position_loss_weight,
             dpace_alpha=dpace_alpha,
             dpace_dev_accept_prob=dpace_dev_accept_prob,
+            dpace_token_source=dpace_token_source,
+            data_token_ids=(
+                self._aligned_data_token_ids(input_ids, block_indices)
+                if dpace_token_source == "data" else None  # noqa: S105
+            ),
             sample_from_anchor=self.config.sample_from_anchor,
         )
         metrics.update(getattr(self, "_anchor_sampling_metrics", {}))
