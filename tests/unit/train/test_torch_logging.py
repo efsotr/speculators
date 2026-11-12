@@ -42,7 +42,8 @@ def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
         from speculators.train.torch_logging import setup_torch_logging
 
         root = Path(os.environ['TEST_TORCH_LOG_ROOT'])
-        cfg = argparse.Namespace(torch_logs='graph_breaks,recompiles,graph_code',
+        cfg = argparse.Namespace(
+            torch_logs='graph_breaks,recompiles,graph_code,output_code',
             torch_logs_format='%(artifactprefix)s %(message)s',
             torch_graph_code_dir=None, log_dir=str(root))
         setup_torch_logging(cfg)
@@ -64,6 +65,8 @@ def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
         setup_torch_logging(cfg)
         assert 'TORCH_LOGS' not in os.environ
         torch._logging.getArtifactLogger('torch._dynamo', 'graph_breaks').debug('CUSTOM_FORMAT_SENTINEL')
+        output_logger = torch._logging.getArtifactLogger('torch._inductor', 'output_code')
+        output_logger.debug('OUTPUT_CODE_SENTINEL')
         logging.shutdown()
         """
     )
@@ -98,9 +101,13 @@ def test_compile_diagnostics_are_short_and_code_is_separate(tmp_path):
     assert "Graph break" in console
     assert "def forward(" not in console
     assert "[__graph_code]" not in console
-    output = (tmp_path / "torch_graph_code" / "rank3_torch_graph_code.txt").read_text()
+    output = (tmp_path / "torch_graph_code" / "rank3_graph_code.txt").read_text()
     assert "def forward(" in output
     combined = (tmp_path / "combined.log").read_text()
     assert "FORMAT_SENTINEL" in combined
     assert "[__graph_code]" not in combined
     assert "def forward(" not in combined
+
+    assert "OUTPUT_CODE_SENTINEL" not in console
+    output_code = tmp_path / "torch_graph_code" / "rank3_output_code.txt"
+    assert "OUTPUT_CODE_SENTINEL" in output_code.read_text()

@@ -617,8 +617,9 @@ class LoggingArgs(_Group):
     )
     torch_graph_code_dir: str | None = Field(
         default=None,
-        description="Separate graph_code files rank{RANK}_torch_graph_code.txt; default: "
-        "<log_dir>/torch_graph_code. FX graph code is excluded from run logs.",
+        description="Separate graph_code files rank{RANK}_graph_code.txt; default: "
+        "<log_dir>/torch_graph_code. FX/generated code is excluded from run logs; "
+        "generated code uses rank{RANK}_output_code.txt.",
     )
     logger: str = Field(
         default="",
