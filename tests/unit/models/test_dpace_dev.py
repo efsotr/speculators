@@ -166,7 +166,7 @@ def test_cpu_inductor_fullgraph_forward_backward(mode):
     torch.testing.assert_close(actual_grad, reference_grad, atol=1e-6, rtol=1e-5)
 
 
-@pytest.mark.parametrize("mode", (*MODES, "tv"))
+@pytest.mark.parametrize("mode", [*MODES, "tv"])
 def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
     torch.manual_seed(74)
     unary = torch.randn(1, 8, 7, requires_grad=True)
@@ -232,7 +232,7 @@ def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
 
 
 @pytest.mark.parametrize("source", ["teacher_argmax", "data"])
-@pytest.mark.parametrize("mode", (*MODES, "tv"))
+@pytest.mark.parametrize("mode", [*MODES, "tv"])
 @pytest.mark.parametrize("loss_name", ["ce", "kl_div"])
 def test_cli_roundtrip_and_dflash2_trainer_kwargs(mode, loss_name, source):
     cfg = TrainConfig.resolve(
