@@ -274,6 +274,8 @@ def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
             f"{sorted(_LOSS_FN_MAPS)}"
         ) from None
 
+    if spec == "ce_tmx":
+        spec = "ce"
     if spec in loss_fn_map:
         return {spec: (loss_fn_map[spec], 1.0)}
 
@@ -293,7 +295,8 @@ def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
         )
 
     config: LossConfig = {}
-    for name, weight in parsed.items():
+    for raw_name, weight in parsed.items():
+        name = "ce" if raw_name == "ce_tmx" else raw_name
         if name not in loss_fn_map:
             raise ValueError(
                 f"Unknown loss function '{name}' in loss config. "
@@ -304,7 +307,8 @@ def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
                 f"Loss weight for '{name}' must be a number, "
                 f"got {type(weight).__name__}"
             )
-        config[name] = (loss_fn_map[name], float(weight))
+        previous_weight = config[name][1] if name in config else 0.0
+        config[name] = (loss_fn_map[name], previous_weight + float(weight))
 
     return config
 

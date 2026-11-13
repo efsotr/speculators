@@ -24,6 +24,11 @@ speculators train ... --loss-fn kl_div
 | `nla`       | Negative log-acceptance, `-log(alpha)` | TV's target with a `1 / alpha` gradient boost, so it trains from a cold start. |
 | `lk_hybrid` | Adaptive KL/TV blend                   | `lambda * KL + (1 - lambda) * TV` with `lambda = exp(-3 * alpha)`, detached.   |
 
+`ce_tmx` is a configuration alias for `ce` (teacher argmax), accepted as a
+single name, in weighted JSON combinations, and for `dpa_dev_signal`. Config
+resolution normalizes it to `ce`; logs and runtime losses use `ce`. If both
+names occur in a combination, their weights are added.
+
 All losses use the selected implementation; there is no automatic fallback.
 
 ## Choosing a Loss

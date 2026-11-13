@@ -112,7 +112,7 @@ def test_shared_weights_gradients_and_reuse(signal):
 @pytest.mark.parametrize(
     "model", [DSparkDraftModel, DFlashDraftModel, DFlash2DraftModel]
 )
-@pytest.mark.parametrize("signal", ["ce", "ce_gt", "kl_div2", "accept"])
+@pytest.mark.parametrize("signal", ["ce", "ce_tmx", "ce_gt", "kl_div2", "accept"])
 def test_cli_and_trainer_roundtrip(model, signal):
     kind = {
         DSparkDraftModel: "dspark",
@@ -139,7 +139,7 @@ def test_cli_and_trainer_roundtrip(model, signal):
     )
     assert TrainConfig.from_flat(cfg.flatten()).model_dump() == cfg.model_dump()
     for kwargs in model.get_trainer_kwargs(**cfg.flatten()):
-        assert kwargs["dpa_dev_signal"] == signal
+        assert kwargs["dpa_dev_signal"] == ("ce" if signal == "ce_tmx" else signal)
         assert kwargs["dpa_dev_alpha"] == pytest.approx(0.3)
 
 
@@ -324,3 +324,35 @@ def test_dflash_accept_without_tv():
     weights = reference_weights(1 - eager.tv_loss(q, p), mask, alpha=0.5)
     expected = (eager.kl_div2_loss(q, p) * mask * weights).sum() / (mask.sum() + 1e-5)
     torch.testing.assert_close(loss, expected)
+
+
+@pytest.mark.parametrize(
+    ("spec", "weights"),
+    [
+        ("ce_tmx", {"ce": 1.0}),
+        ('{"ce_tmx": 0.1, "tv": 0.9}', {"ce": 0.1, "tv": 0.9}),
+        ('{"ce": 0.2, "ce_tmx": 0.3}', {"ce": 0.5}),
+    ],
+)
+def test_ce_tmx_config_alias(spec, weights):
+    cfg = TrainConfig.resolve(
+        [
+            "--verifier-name-or-path",
+            "dummy",
+            "--speculator-type",
+            "dspark",
+            "--loss-fn",
+            spec,
+            "--per-position-loss-weight",
+            "dpa-dev",
+            "--dpa-dev-signal",
+            "ce_tmx",
+        ]
+    )
+    assert "ce_tmx" not in cfg.loss.loss_fn
+    assert cfg.dflash.dpa_dev_signal == "ce"
+    assert TrainConfig.from_flat(cfg.flatten()).model_dump() == cfg.model_dump()
+    for impl in ("eager", "fused"):
+        resolved = resolve_loss_config(spec, impl)
+        assert {name: weight for name, (_, weight) in resolved.items()} == weights
+        assert resolved["ce"][0] is resolve_loss_config("ce", impl)["ce"][0]

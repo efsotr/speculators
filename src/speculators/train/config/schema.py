@@ -4,6 +4,7 @@ Each tunable is one typed ``pydantic`` field; adding one is a one-field edit.
 :class:`TrainConfig` is the sole public type (``resolution`` builds the CLI).
 """
 
+import json
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -454,7 +455,11 @@ class LossArgs(_Group):
             # Unset -> resolved later in TrainConfig._resolve_derived_defaults,
             # once speculator_type is known.
             return v
-        resolve_loss_config(v)
+        resolved = resolve_loss_config(v)
+        if v == "ce_tmx":
+            return "ce"
+        if "ce_tmx" in v:
+            return json.dumps({name: weight for name, (_, weight) in resolved.items()})
         return v
 
 
@@ -664,10 +669,16 @@ class DFlashArgs(_Group):
         "(shared detached weights for DFlash/DFlash2/DSpark). "
         "(default: dpace for dflash, fixed-exp-decay otherwise).",
     )
-    dpa_dev_signal: Literal["ce", "ce_gt", "kl_div2", "accept"] = Field(
+    dpa_dev_signal: Literal["ce", "ce_tmx", "ce_gt", "kl_div2", "accept"] = Field(
         default="accept",
         description="Shared DPA-dev weight signal; loss signals must occur in loss_fn.",
     )
+
+    @field_validator("dpa_dev_signal", mode="before")
+    @classmethod
+    def _normalize_dpa_dev_signal(cls, v: str) -> str:
+        return "ce" if v == "ce_tmx" else v
+
     dpa_dev_alpha: float = Field(default=0.5, gt=0.0, le=1.0)
     dpace_token_source: Literal["teacher_argmax", "data"] = Field(
         default="teacher_argmax",
