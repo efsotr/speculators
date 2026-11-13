@@ -87,6 +87,7 @@ def compute_selector_loss(
     target_probs: torch.Tensor | None = None,
     draft_probs: torch.Tensor | None = None,
     selector_overlap: torch.Tensor | None = None,
+    shared_weight: torch.Tensor | None = None,
     dpace_dev_accept_prob: str = "q",
 ) -> torch.Tensor:
     """Compute teacher-forced hard CE over the runtime-sized candidate set."""
@@ -94,7 +95,13 @@ def compute_selector_loss(
         torch.arange(candidate_logits.shape[1], device=candidate_logits.device)
         % block_size
     ).unsqueeze(0)
-    if per_position_loss_weight == "dpace_dev":
+    if per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+        if shared_weight is None:
+            raise ValueError("dpa-dev selector requires shared unary weights")
+
+        def decay_fn(*_args, **_kwargs):
+            return shared_weight
+    elif per_position_loss_weight == "dpace_dev":
         if target_probs is None or draft_probs is None:
             raise ValueError(
                 "dpace_dev selector requires full-vocabulary p and original K-way q"
@@ -151,12 +158,16 @@ def compute_metrics(
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
     dpace_dev_accept_prob: str = "q",
+    dpa_dev_signal: str = "accept",
+    dpa_dev_alpha: float = 0.5,
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
     dpace_candidate_ids: torch.Tensor | None = None,
     dpace_candidate_logits: torch.Tensor | None = None,
+    dpa_dev_weights: dict | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine the unary DFlash objective with a K-way selector objective."""
+    shared_weights = {}
     unary_loss, metrics = compute_unary_metrics(
         unary_logits,
         targets,
@@ -167,6 +178,9 @@ def compute_metrics(
         tv_loss_fn=tv_loss_fn,
         gamma=gamma,
         confidence_head_alpha=0.0,
+        dpa_dev_signal=dpa_dev_signal,
+        dpa_dev_alpha=dpa_dev_alpha,
+        shared_weights=shared_weights,
         dpace_token_source=dpace_token_source,
         data_token_ids=data_token_ids,
         per_position_loss_weight=per_position_loss_weight,
@@ -209,12 +223,15 @@ def compute_metrics(
         target_probs=target_probs,
         draft_probs=draft_probs,
         selector_overlap=selector_overlap,
+        shared_weight=shared_weights.get("weights"),
         gamma=gamma,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,
         dpace_dev_accept_prob=dpace_dev_accept_prob,
         sample_from_anchor=sample_from_anchor,
     )
+    if dpa_dev_weights is not None:
+        dpa_dev_weights.update(shared_weights)
     loss = unary_loss + selector_loss_alpha * selector_loss
 
     one = torch.ones((), device=unary_logits.device)

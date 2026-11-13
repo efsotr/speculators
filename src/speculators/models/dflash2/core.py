@@ -119,6 +119,8 @@ class DFlash2DraftModel(DFlashDraftModel):
             ),
             "dpace_dev_accept_prob": kwargs.get("dpace_dev_accept_prob", "q"),
             "dpace_token_source": kwargs.get("dpace_token_source", "teacher_argmax"),
+            "dpa_dev_signal": kwargs.get("dpa_dev_signal", "accept"),
+            "dpa_dev_alpha": kwargs.get("dpa_dev_alpha", 0.5),
             "dpace_alpha": kwargs.get("dpace_alpha", 0.5),
             "selector_loss_alpha": kwargs.get("selector_loss_alpha", 1.0),
             "hidden_state_mse_alpha": kwargs.get("hidden_state_mse_alpha", 0.0),
@@ -160,6 +162,8 @@ class DFlash2DraftModel(DFlashDraftModel):
         selector_loss_alpha: float = 1.0,
         hidden_state_mse_alpha: float = 0.0,
         per_position_loss_weight: str = "fixed-exp-decay",
+        dpa_dev_signal: str = "accept",
+        dpa_dev_alpha: float = 0.5,
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
         dpace_token_source: str = "teacher_argmax",  # noqa: S107
@@ -200,6 +204,7 @@ class DFlash2DraftModel(DFlashDraftModel):
                     unary_logits, hidden, predecessor_ids.reshape(1, -1), candidate_ids
                 )
 
+        dpa_dev_weights = {}
         loss, metrics = compute_metrics(
             unary_logits=unary_logits,
             targets=targets,
@@ -217,7 +222,10 @@ class DFlash2DraftModel(DFlashDraftModel):
             tv_loss_fn=tv_loss_fn,
             gamma=gamma,
             selector_loss_alpha=selector_loss_alpha,
+            dpa_dev_weights=dpa_dev_weights,
             per_position_loss_weight=per_position_loss_weight,
+            dpa_dev_signal=dpa_dev_signal,
+            dpa_dev_alpha=dpa_dev_alpha,
             dpace_alpha=dpace_alpha,
             dpace_dev_accept_prob=dpace_dev_accept_prob,
             dpace_token_source=dpace_token_source,
@@ -250,6 +258,7 @@ class DFlash2DraftModel(DFlashDraftModel):
                 document_ids,
                 block_size=self.block_size,
                 sample_from_anchor=self.config.sample_from_anchor,
+                position_weights=dpa_dev_weights.get("weights"),
             )
             loss = loss + hidden_state_mse_alpha * mse
             metrics["hidden_state_mse_sum"] = mse.detach()

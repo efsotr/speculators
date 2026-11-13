@@ -431,7 +431,7 @@ class LossArgs(_Group):
     loss_fn: str | None = Field(
         default=None,
         description="Loss function specification. A name "
-        "(kl_div, rkl, jsd, ce, ce_gt, tv, "
+        "(kl_div, kl_div2, rkl, jsd, ce, ce_gt, tv, "
         'nla, lk_hybrid) or a JSON dict for a weighted combination, e.g. \'{"ce": 0.1, '
         '"tv": 0.9}\'. (default: "ce" for dflash, \'{"ce": 0.1, "tv": 0.9}\' for '
         'xpress, "kl_div" otherwise).',
@@ -656,13 +656,19 @@ class DFlashArgs(_Group):
         default=4.0, description="Decay gamma for DFlash-family loss weighting."
     )
     per_position_loss_weight: (
-        Literal["fixed-exp-decay", "dpace", "dpace_dev"] | None
+        Literal["fixed-exp-decay", "dpace", "dpace_dev", "dpa_dev", "dpa-dev"] | None
     ) = Field(
         default=None,
         description="Per-position loss weighting: fixed-exp-decay, dpace, or "
-        "dpace_dev (DFlash/DFlash2 with CE or KL). "
+        "dpace_dev (DFlash/DFlash2 with CE or KL), or dpa-dev "
+        "(shared detached weights for DFlash/DFlash2/DSpark). "
         "(default: dpace for dflash, fixed-exp-decay otherwise).",
     )
+    dpa_dev_signal: Literal["ce", "ce_gt", "kl_div2", "accept"] = Field(
+        default="accept",
+        description="Shared DPA-dev weight signal; loss signals must occur in loss_fn.",
+    )
+    dpa_dev_alpha: float = Field(default=0.5, gt=0.0, le=1.0)
     dpace_token_source: Literal["teacher_argmax", "data"] = Field(
         default="teacher_argmax",
         description="Token used for dpace_dev q/p: teacher argmax or aligned "
@@ -1009,6 +1015,19 @@ class TrainConfig(BaseSettings):
             self.loss.loss_fn = _DEFAULT_LOSS_FN.get(self.speculator_type, "kl_div")
         if self.dflash.block_size is None:
             self.dflash.block_size = _DEFAULT_BLOCK_SIZE.get(self.speculator_type, 8)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dpa_dev(self) -> "TrainConfig":
+        if self.dflash.per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+            if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
+                raise ValueError("dpa-dev requires dflash, dflash2 or dspark")
+            signal = self.dflash.dpa_dev_signal
+            losses = resolve_loss_config(self.loss.loss_fn)
+            if signal != "accept" and signal not in losses:
+                raise ValueError(
+                    f"dpa_dev_signal={signal} requires that loss in loss_fn"
+                )
         return self
 
     @model_validator(mode="after")

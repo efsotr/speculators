@@ -11,7 +11,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding,
 )
 
-from speculators.losses import LossConfig, resolve_loss_config
+from speculators.losses import LossConfig, resolve_loss_config, tv_loss
 from speculators.model import DraftVocabMixin, SpeculatorModel
 from speculators.models.attention import create_float_mask
 from speculators.models.dflash import DFlashSpeculatorConfig
@@ -446,6 +446,11 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             "per_position_loss_weight": per_position_loss_weight,
             "dpace_dev_accept_prob": kwargs.get("dpace_dev_accept_prob", "q"),
             "dpace_token_source": kwargs.get("dpace_token_source", "teacher_argmax"),
+            "tv_loss_fn": resolve_loss_config(
+                "tv", kwargs.get("loss_implementation", "fused")
+            )["tv"][0],
+            "dpa_dev_signal": kwargs.get("dpa_dev_signal", "accept"),
+            "dpa_dev_alpha": kwargs.get("dpa_dev_alpha", 0.5),
             "dpace_alpha": dpace_alpha,
         }
         train = dict(shared)
@@ -773,6 +778,8 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         gamma: float = 4.0,
         max_anchors: int = 512,
         per_position_loss_weight: str = "fixed-exp-decay",
+        dpa_dev_signal: str = "accept",
+        dpa_dev_alpha: float = 0.5,
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
         dpace_token_source: str = "teacher_argmax",  # noqa: S107
@@ -796,6 +803,9 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             gamma=gamma,
             loss_config=loss_config,
             per_position_loss_weight=per_position_loss_weight,
+            tv_loss_fn=kwargs.get("tv_loss_fn", tv_loss),
+            dpa_dev_signal=dpa_dev_signal,
+            dpa_dev_alpha=dpa_dev_alpha,
             dpace_alpha=dpace_alpha,
             dpace_dev_accept_prob=dpace_dev_accept_prob,
             dpace_token_source=dpace_token_source,

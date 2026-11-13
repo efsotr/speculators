@@ -15,6 +15,7 @@ speculators train ... --loss-fn kl_div
 | Name        | Objective                              | Notes                                                                          |
 | ----------- | -------------------------------------- | ------------------------------------------------------------------------------ |
 | `kl_div`    | Forward KL, target to draft            | Default. Mass-covering: penalizes the draft for missing target mass.           |
+| `kl_div2`  | Soft-target cross entropy, `-sum_i p_i log q_i` | Forward KL without the teacher entropy term; same draft gradient, different values and DPA-dev weights. |
 | `rkl`       | Reverse KL, draft to target            | Mode-seeking: the draft concentrates on the target's dominant modes.           |
 | `jsd`       | Jensen-Shannon divergence              | Symmetric, bounded by `log 2`. Balances forward and reverse KL.                |
 | `ce`        | Cross-entropy against `argmax p`       | Hard labels from the target. Required by `--per-position-loss-weight dpace`.   |
@@ -69,3 +70,36 @@ DeepSpec DSpark's `0.1 CE + 0.9 L1` corresponds to `0.1 ce_gt + 1.8 tv` in
 per-token objectives. This does not make the complete training loss identical:
 DeepSpec normalizes by globally summed decayed mask weights, whereas the local
 implementation normalizes by each rank's undecayed mask count.
+
+## DPA-dev shared position weights
+
+DFlash, DFlash2 and DSpark support `dflash.per_position_loss_weight: dpa_dev`
+(`dpa-dev` is also accepted). All loss terms use the same detached per-token
+weights, including DSpark confidence BCE, DFlash2 selector CE and optional hidden
+MSE. Existing loss coefficients and mask-count normalization remain in effect.
+The weights reuse D-PACE smoothing, block prefix products and suffix sums.
+
+```yaml
+loss:
+  loss_fn: '{"kl_div2": 1.0, "tv": 1.8}'
+dflash:
+  per_position_loss_weight: dpa_dev
+  dpa_dev_signal: kl_div2
+  dpa_dev_alpha: 0.5
+```
+
+The independent parameters are `dpa_dev_signal` (default `accept`) and
+`dpa_dev_alpha` (default `0.5`, in `(0, 1]`); their CLI forms are
+`--dpa-dev-signal` and `--dpa-dev-alpha`. DPA-dev ignores `dpace_*` settings.
+The signals `ce`, `ce_gt`, `kl_div2` require the corresponding term in `loss_fn`
+and use `exp(-loss.detach())` before smoothing. Loss coefficients do not enter
+the signal. `kl_div` is not a supported signal: it includes `sum p log p`,
+whereas `kl_div2 = -sum p log q` excludes that teacher entropy contribution.
+Both loss implementations support `kl_div2`; fused forward streams vocabulary
+tiles without materializing dense probabilities and reuses KL backward.
+
+`accept` uses detached `1 - tv`, reusing the per-token TV loss when configured;
+otherwise TV is computed without gradients. Each configured loss is evaluated
+once and reused for reduction and weighting. DFlash2 derives weights from unary
+losses and shares them with its auxiliary objectives. Weights are computed only
+after detaching the signal; gradients flow through the original losses.

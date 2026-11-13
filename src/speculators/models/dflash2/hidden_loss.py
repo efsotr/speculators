@@ -13,6 +13,7 @@ def predicted_hidden_mse(
     *,
     block_size: int,
     sample_from_anchor: bool,
+    position_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Mean over supervised tokens and channels, with detached teacher targets.
 
@@ -36,4 +37,7 @@ def predicted_hidden_mse(
         (weights > 0).unsqueeze(-1), hidden.float() - targets.float(), 0.0
     )
     squared_error = difference.square().mean(dim=-1)
-    return (squared_error * weights).sum() / weights.sum().clamp_min(1.0)
+    weighted_error = squared_error * weights
+    if position_weights is not None:
+        weighted_error = weighted_error * position_weights.detach()
+    return weighted_error.sum() / weights.sum().clamp_min(1.0)

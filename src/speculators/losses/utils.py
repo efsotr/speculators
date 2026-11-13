@@ -195,6 +195,10 @@ def kl_div_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return _fused_kernel("fused_kl_div_loss")(logits, targets)
 
 
+def kl_div2_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    return _fused_kernel("fused_kl_div2_loss")(logits, targets)
+
+
 def reverse_kl_div_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return _fused_kernel("fused_reverse_kl_div_loss")(logits, targets)
 
@@ -229,6 +233,7 @@ def lk_hybrid_loss(
 
 _FUSED_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = {
     "kl_div": kl_div_loss,
+    "kl_div2": kl_div2_loss,
     "rkl": reverse_kl_div_loss,
     "jsd": js_div_loss,
     "ce": ce_loss,
@@ -241,6 +246,7 @@ _FUSED_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
 
 _EAGER_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = {
     "kl_div": eager.kl_div_loss,
+    "kl_div2": eager.kl_div2_loss,
     "rkl": eager.reverse_kl_div_loss,
     "jsd": eager.js_div_loss,
     "ce": eager.ce_loss,
@@ -312,6 +318,7 @@ def compound_loss(
     decay_fn: Callable[..., torch.Tensor] | None = None,
     *,
     data_token_ids: torch.Tensor | None = None,
+    elementwise_losses: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute a weighted sum of loss terms.
 
@@ -342,6 +349,9 @@ def compound_loss(
             pos_idx,
             loss_fn=fn,
             decay_fn=decay_fn,
+            elementwise_loss=(
+                None if elementwise_losses is None else elementwise_losses[name]
+            ),
         )
         if multi:
             term_losses[f"{name}_loss"] = term.detach()
@@ -356,6 +366,8 @@ def loss_function(
     pos_idx: torch.Tensor,  # shape: [1, seq_len]
     loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = kl_div_loss,
     decay_fn: Callable[..., torch.Tensor] | None = None,
+    *,
+    elementwise_loss: torch.Tensor | None = None,
 ):
     """Compute masked, optionally position-decayed training loss.
 
@@ -370,7 +382,8 @@ def loss_function(
     Returns:
         Scalar mean loss across the batch.
     """
-    elementwise_loss = loss_fn(logits, targets)  # shape: [1, seq_len]
+    if elementwise_loss is None:
+        elementwise_loss = loss_fn(logits, targets)  # shape: [1, seq_len]
 
     loss_mask = loss_mask.to(elementwise_loss.dtype)
     elementwise_loss = elementwise_loss * loss_mask

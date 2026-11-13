@@ -27,6 +27,7 @@ from speculators.losses import (
     dpace_loss_decay,
     tv_loss,
 )
+from speculators.losses.dpa_dev import prepare_dpa_dev
 from speculators.models.metrics import (
     compute_accepted_length_counts,
     compute_accuracy_multi_step,
@@ -56,7 +57,7 @@ def _masked_decayed_mean(
     return (weighted.sum(dim=1) / denominator).mean()
 
 
-def compute_metrics(
+def compute_metrics(  # noqa: C901
     logits: torch.Tensor,  # [1, T, draft_vocab_size] (Markov-corrected)
     targets: torch.Tensor,  # [1, T, draft_vocab_size]
     confidence_logits: torch.Tensor | None,  # [1, T] or None
@@ -67,11 +68,14 @@ def compute_metrics(
     gamma: float = 4.0,
     confidence_head_alpha: float = 1.0,
     per_position_loss_weight: str = "fixed-exp-decay",
+    dpa_dev_signal: str = "accept",
+    dpa_dev_alpha: float = 0.5,
     dpace_alpha: float = 0.5,
     dpace_dev_accept_prob: str = "q",
     sample_from_anchor: bool = True,
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
+    shared_weights: dict | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the DSpark loss and a metrics dict (``*_sum``/``*_total`` pairs)."""
 
@@ -79,7 +83,26 @@ def compute_metrics(
     seq_len = logits.shape[1]
     pos_idx = (torch.arange(seq_len, device=device) % block_size).unsqueeze(0)
     start_pos = 0 if sample_from_anchor else 1
-    if per_position_loss_weight == "dpace_dev":
+    elementwise_losses = None
+    if per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+        elementwise_losses, weights, accept_rate = prepare_dpa_dev(
+            logits,
+            targets,
+            loss_mask,
+            block_size,
+            loss_config,
+            dpa_dev_signal=dpa_dev_signal,
+            dpa_dev_alpha=dpa_dev_alpha,
+            data_token_ids=data_token_ids,
+            tv_loss_fn=tv_loss_fn,
+        )
+
+        def decay_fn(*_args, **_kwargs):
+            return weights
+
+        if shared_weights is not None:
+            shared_weights["weights"] = weights
+    elif per_position_loss_weight == "dpace_dev":
         if dpace_token_source == "data" and data_token_ids is None:  # noqa: S105
             raise ValueError("dpace_token_source=data requires aligned data_token_ids")
         q, p = dpace_dev_token_probs(
@@ -112,15 +135,21 @@ def compute_metrics(
         )
 
     loss, term_losses = compound_loss(
-        logits, targets, loss_mask, pos_idx,
-        loss_config=loss_config, decay_fn=decay_fn,
+        logits,
+        targets,
+        loss_mask,
+        pos_idx,
+        loss_config=loss_config,
+        decay_fn=decay_fn,
+        elementwise_losses=elementwise_losses,
         data_token_ids=data_token_ids,
     )
 
     # Analytical per-position acceptance rate = distributional overlap
     # = 1 - TV; the fused kernel avoids the two full-vocab fp32 softmaxes.
     with torch.no_grad():
-        accept_rate = 1.0 - tv_loss_fn(logits, targets)  # [1, T]
+        if per_position_loss_weight not in {"dpa_dev", "dpa-dev"}:
+            accept_rate = 1.0 - tv_loss_fn(logits, targets)  # [1, T]
         # Per-block cumulative acceptance product over the draft slots (slot 0
         # is the anchor), shared by the accept-length and calibration metrics.
         num_blocks = seq_len // block_size
@@ -136,11 +165,20 @@ def compute_metrics(
         bce = binary_cross_entropy_with_logits(
             confidence_logits, c_star, reduction="none"
         )  # [1, T]
-        # D-PACE expects token CE, so keep the confidence BCE on fixed decay.
+        # Legacy D-PACE keeps fixed confidence decay; DPA-dev shares its weights.
         confidence_decay_fn = partial(
             dflash_loss_decay, gamma=gamma, sample_from_anchor=sample_from_anchor
         )
-        conf_loss = _masked_decayed_mean(bce, loss_mask, pos_idx, confidence_decay_fn)
+        conf_loss = _masked_decayed_mean(
+            bce,
+            loss_mask,
+            pos_idx,
+            (
+                decay_fn
+                if per_position_loss_weight in {"dpa_dev", "dpa-dev"}
+                else confidence_decay_fn
+            ),
+        )
         loss = loss + confidence_head_alpha * conf_loss
 
         with torch.no_grad():

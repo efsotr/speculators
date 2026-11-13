@@ -30,6 +30,13 @@ def kl_div_loss(
     return elementwise_loss  # noqa: RET504
 
 
+def kl_div2_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Soft-target cross entropy -sum(p * log(q)), without teacher entropy."""
+    logq = logits.float().log_softmax(-1)
+    p = targets.float().softmax(-1)
+    return -(p * logq).sum(-1)
+
+
 def reverse_kl_div_loss(
     logits: torch.Tensor,  # shape: [1, seq_len, draft_vocab_size]
     targets: torch.Tensor,  # shape: [1, seq_len, draft_vocab_size]

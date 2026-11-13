@@ -85,6 +85,7 @@ _OP_JSD = tl.constexpr(2)
 _OP_CE = tl.constexpr(3)
 _OP_TV = tl.constexpr(4)
 _OP_CE_GT = tl.constexpr(5)
+_OP_KL2 = tl.constexpr(6)
 
 # stats [_N_STATS, n_rows]: [0]/[1] draft row max / sum-exp, [2]/[3] same for
 # targets (unused by ce), [4] per-OP -- kl_div/rkl: row loss L | jsd:
@@ -229,6 +230,8 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
             tp = tl.exp(ltp)
             if OP == _OP_KL:
                 acc += tl.sum(tl.where(mask, tp * (ltp - ldp), 0.0))
+            elif OP == _OP_KL2:
+                acc += tl.sum(tl.where(mask, -tp * ldp, 0.0))
             elif OP == _OP_RKL:
                 acc += tl.sum(tl.where(mask, dp * (ldp - ltp), 0.0))
             elif OP == _OP_JSD:
@@ -240,7 +243,7 @@ def loss_forward_kernel(  # noqa: C901 -- constexpr OP branches, pruned per inst
                 extra += tl.sum(tl.where(mask & (dp <= tp), dp, 0.0))
 
         # Lint exemptions: `in`/merged compares aren't constexpr-foldable here.
-        if OP == _OP_KL or OP == _OP_RKL:  # noqa: PLR1714, SIM109
+        if OP == _OP_KL or OP == _OP_RKL or OP == _OP_KL2:  # noqa: PLR1714, SIM109
             tl.store(loss_ptr + pid, acc)
             tl.store(stats_ptr + 4 * stats_row + pid, acc)
         elif OP == _OP_JSD:
@@ -372,6 +375,8 @@ class _FusedLoss(torch.autograd.Function):
         loss, stats = _loss_forward(logits_flat, targets_flat, op)
         # Both CE variants share the same cached-ID backward.
         backward_op = _OP_CE.value if op == _OP_CE_GT.value else op
+        if op == _OP_KL2.value:
+            backward_op = _OP_KL.value
         # CE backward only needs the target argmax cached in stats.
         ctx.save_for_backward(
             logits_flat, None if backward_op == _OP_CE.value else targets_flat, stats
@@ -400,6 +405,11 @@ _NLA_EPS = 1e-5
 def fused_kl_div_loss(logits, targets):
     """Per-position forward KL ``[1, T]``; fused twin of ``kl_div_loss``."""
     return _FusedLoss.apply(logits, targets, _OP_KL.value)
+
+
+def fused_kl_div2_loss(logits, targets):
+    """Soft-target cross entropy -sum(p * log(q)); same draft gradient as KL."""
+    return _FusedLoss.apply(logits, targets, _OP_KL2.value)
 
 
 def fused_reverse_kl_div_loss(logits, targets):

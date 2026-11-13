@@ -15,6 +15,7 @@ from speculators.losses import (
     kl_div_loss,
     tv_loss,
 )
+from speculators.losses.dpa_dev import prepare_dpa_dev
 from speculators.models.metrics import (
     compute_accepted_length_counts,
     compute_accuracy_multi_step,
@@ -31,11 +32,14 @@ def compute_metrics(
     gamma: float = 4.0,
     loss_config: LossConfig | None = None,
     per_position_loss_weight: str = "fixed-exp-decay",
+    dpa_dev_signal: str = "accept",
+    dpa_dev_alpha: float = 0.5,
     dpace_alpha: float = 0.5,
     dpace_dev_accept_prob: str = "q",
     sample_from_anchor: bool = False,
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
+    tv_loss_fn=tv_loss,
 ) -> tuple[torch.Tensor, dict]:
     """Compute loss and accuracy metrics for draft model predictions.
 
@@ -63,7 +67,23 @@ def compute_metrics(
     pos_idx = torch.arange(seq_len, device=logits.device) % block_size
     pos_idx = pos_idx.unsqueeze(0)  # shape: [1, T]
 
-    if per_position_loss_weight == "dpace_dev":
+    elementwise_losses = None
+    if per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+        elementwise_losses, weights, _accept_rate = prepare_dpa_dev(
+            logits,
+            targets,
+            loss_mask,
+            block_size,
+            loss_config,
+            dpa_dev_signal=dpa_dev_signal,
+            dpa_dev_alpha=dpa_dev_alpha,
+            data_token_ids=data_token_ids,
+            tv_loss_fn=tv_loss_fn,
+        )
+
+        def decay_fn(*_args, **_kwargs):
+            return weights
+    elif per_position_loss_weight == "dpace_dev":
         if dpace_token_source == "data" and data_token_ids is None:  # noqa: S105
             raise ValueError("dpace_token_source=data requires aligned data_token_ids")
         q, p = dpace_dev_token_probs(
@@ -102,6 +122,7 @@ def compute_metrics(
         pos_idx,
         loss_config=loss_config,
         decay_fn=decay_fn,
+        elementwise_losses=elementwise_losses,
         data_token_ids=data_token_ids,
     )
 
