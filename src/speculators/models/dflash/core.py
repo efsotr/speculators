@@ -821,6 +821,10 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                 if (
                     dpace_token_source == "data"  # noqa: S105
                     or "ce_gt" in (loss_config or {})
+                    or (
+                        per_position_loss_weight in {"dpa_dev", "dpa-dev"}
+                        and dpa_dev_signal in {"p_draft", "q_draft"}
+                    )
                 )
                 else None
             ),

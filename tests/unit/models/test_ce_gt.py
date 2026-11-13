@@ -178,7 +178,8 @@ def test_project_dspark_configs():
 
 
 @pytest.mark.parametrize("sample_from_anchor", [False, True])
-def test_dspark_model_ce_gt_forward_backward(monkeypatch, sample_from_anchor):
+@pytest.mark.parametrize("signal", [None, "ce_gt", "p_draft", "q_draft"])
+def test_dspark_model_ce_gt_forward_backward(monkeypatch, sample_from_anchor, signal):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     config = DSparkSpeculatorConfig(
         transformer_layer_config=Qwen3Config(
@@ -215,14 +216,23 @@ def test_dspark_model_ce_gt_forward_backward(monkeypatch, sample_from_anchor):
         "document_ids": torch.zeros(1, 24, dtype=torch.long),
     }
     kwargs, _ = model.get_trainer_kwargs(
-        loss_fn='{"ce_gt": 0.1, "tv": 1.8}',
+        loss_fn=(
+            '{"ce": 0.1, "tv": 1.8}'
+            if signal in {"p_draft", "q_draft"}
+            else '{"ce_gt": 0.1, "tv": 1.8}'
+        ),
         loss_implementation="eager",
+        per_position_loss_weight="dpa-dev" if signal else "fixed-exp-decay",
+        dpa_dev_signal=signal or "accept",
+        dpa_dev_prefix_only=signal in {"p_draft", "q_draft"},
         max_anchors=3,
     )
     prepared = model.prepare_training_inputs(**batch, **kwargs)
     _, loss, metrics = model(**prepared)
     assert torch.isfinite(loss)
-    assert "ce_gt_loss_sum" in metrics
+    assert (
+        "ce_loss_sum" if signal in {"p_draft", "q_draft"} else "ce_gt_loss_sum"
+    ) in metrics
     loss.backward()
     for head in (model.markov_head, model.confidence_head):
         grads = [p.grad for p in head.parameters() if p.requires_grad]

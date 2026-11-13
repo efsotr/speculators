@@ -223,7 +223,13 @@ class DSparkDraftModel(DFlashDraftModel):
                     anchored_block_indices,
                     require_full_vocab="ce_gt" in (loss_config or {}),
                 )
-                if "ce_gt" in (loss_config or {})
+                if (
+                    "ce_gt" in (loss_config or {})
+                    or (
+                        per_position_loss_weight in {"dpa_dev", "dpa-dev"}
+                        and dpa_dev_signal in {"p_draft", "q_draft"}
+                    )
+                )
                 else None
             ),
         )
