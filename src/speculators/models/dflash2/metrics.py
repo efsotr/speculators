@@ -160,6 +160,7 @@ def compute_metrics(
     dpace_dev_accept_prob: str = "q",
     dpa_dev_signal: str = "accept",
     dpa_dev_alpha: float = 0.5,
+    dpa_dev_prefix_only: bool = False,
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
     dpace_candidate_ids: torch.Tensor | None = None,
@@ -180,6 +181,7 @@ def compute_metrics(
         confidence_head_alpha=0.0,
         dpa_dev_signal=dpa_dev_signal,
         dpa_dev_alpha=dpa_dev_alpha,
+        dpa_dev_prefix_only=dpa_dev_prefix_only,
         shared_weights=shared_weights,
         dpace_token_source=dpace_token_source,
         data_token_ids=data_token_ids,

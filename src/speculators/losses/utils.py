@@ -92,6 +92,8 @@ def _dpace_probability_weights(
     loss_mask: torch.Tensor,
     block_size: int,
     dpace_alpha: float,
+    *,
+    prefix_only: bool = False,
 ) -> torch.Tensor:
     # reshape loss to [num_anchors, block_size]
     # for intra-block cumulative multiplication
@@ -106,6 +108,10 @@ def _dpace_probability_weights(
     # smoothed confidence for numerical stability
     smooth = (1.0 - dpace_alpha) * q + dpace_alpha
     smooth = torch.where(mask > 0, smooth, torch.ones_like(smooth))
+
+    if prefix_only:
+        exclusive = torch.cat((torch.ones_like(smooth[:, :1]), smooth[:, :-1]), dim=-1)
+        return (torch.cumprod(exclusive, dim=-1) * mask).reshape(1, -1)
 
     # prefix cumulative production
     prefix = torch.cumprod(smooth, dim=-1)

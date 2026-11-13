@@ -108,3 +108,13 @@ otherwise TV is computed without gradients. Each configured loss is evaluated
 once and reused for reduction and weighting. DFlash2 derives weights from unary
 losses and shares them with its auxiliary objectives. Weights are computed only
 after detaching the signal; gradients flow through the original losses.
+
+`dpa_dev_signal: p_draft` uses `min(1, q(x)/p(x))`; `q_draft` uses
+`min(1, p(x)/q(x))`, where p is the teacher distribution, q the draft
+distribution, and x is always the aligned dataset token (required).
+Ratios use detached fp32 probabilities and clamp the denominator to fp32 tiny.
+`dpa_dev_prefix_only: true` (`--dpa-dev-prefix-only`) is supported only
+with these two signals. Its weight at position i is the product over j < i
+of `alpha + (1-alpha)*prob_j`, with the empty product equal to 1.
+Masked positions receive zero weight and contribute a factor of 1; products
+restart at each block. The default is false, retaining prefix/suffix weights.

@@ -669,7 +669,9 @@ class DFlashArgs(_Group):
         "(shared detached weights for DFlash/DFlash2/DSpark). "
         "(default: dpace for dflash, fixed-exp-decay otherwise).",
     )
-    dpa_dev_signal: Literal["ce", "ce_tmx", "ce_gt", "kl_div2", "accept"] = Field(
+    dpa_dev_signal: Literal[
+        "ce", "ce_tmx", "ce_gt", "kl_div2", "accept", "p_draft", "q_draft"
+    ] = Field(
         default="accept",
         description="Shared DPA-dev weight signal; loss signals must occur in loss_fn.",
     )
@@ -679,6 +681,10 @@ class DFlashArgs(_Group):
     def _normalize_dpa_dev_signal(cls, v: str) -> str:
         return "ce" if v == "ce_tmx" else v
 
+    dpa_dev_prefix_only: bool = Field(
+        default=False,
+        description="Exclusive prefix weights; requires p_draft or q_draft.",
+    )
     dpa_dev_alpha: float = Field(default=0.5, gt=0.0, le=1.0)
     dpace_token_source: Literal["teacher_argmax", "data"] = Field(
         default="teacher_argmax",
@@ -1035,7 +1041,9 @@ class TrainConfig(BaseSettings):
                 raise ValueError("dpa-dev requires dflash, dflash2 or dspark")
             signal = self.dflash.dpa_dev_signal
             losses = resolve_loss_config(self.loss.loss_fn)
-            if signal != "accept" and signal not in losses:
+            if self.dflash.dpa_dev_prefix_only and signal not in {"p_draft", "q_draft"}:
+                raise ValueError("dpa_dev_prefix_only requires p_draft or q_draft")
+            if signal not in {"accept", "p_draft", "q_draft"} and signal not in losses:
                 raise ValueError(
                     f"dpa_dev_signal={signal} requires that loss in loss_fn"
                 )

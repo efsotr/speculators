@@ -451,6 +451,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             )["tv"][0],
             "dpa_dev_signal": kwargs.get("dpa_dev_signal", "accept"),
             "dpa_dev_alpha": kwargs.get("dpa_dev_alpha", 0.5),
+            "dpa_dev_prefix_only": kwargs.get("dpa_dev_prefix_only", False),
             "dpace_alpha": dpace_alpha,
         }
         train = dict(shared)
@@ -780,6 +781,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         per_position_loss_weight: str = "fixed-exp-decay",
         dpa_dev_signal: str = "accept",
         dpa_dev_alpha: float = 0.5,
+        dpa_dev_prefix_only: bool = False,
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
         dpace_token_source: str = "teacher_argmax",  # noqa: S107
@@ -806,6 +808,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             tv_loss_fn=kwargs.get("tv_loss_fn", tv_loss),
             dpa_dev_signal=dpa_dev_signal,
             dpa_dev_alpha=dpa_dev_alpha,
+            dpa_dev_prefix_only=dpa_dev_prefix_only,
             dpace_alpha=dpace_alpha,
             dpace_dev_accept_prob=dpace_dev_accept_prob,
             dpace_token_source=dpace_token_source,

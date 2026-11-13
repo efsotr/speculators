@@ -121,6 +121,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             "dpace_token_source": kwargs.get("dpace_token_source", "teacher_argmax"),
             "dpa_dev_signal": kwargs.get("dpa_dev_signal", "accept"),
             "dpa_dev_alpha": kwargs.get("dpa_dev_alpha", 0.5),
+            "dpa_dev_prefix_only": kwargs.get("dpa_dev_prefix_only", False),
             "dpace_alpha": kwargs.get("dpace_alpha", 0.5),
             "selector_loss_alpha": kwargs.get("selector_loss_alpha", 1.0),
             "hidden_state_mse_alpha": kwargs.get("hidden_state_mse_alpha", 0.0),
@@ -164,6 +165,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         per_position_loss_weight: str = "fixed-exp-decay",
         dpa_dev_signal: str = "accept",
         dpa_dev_alpha: float = 0.5,
+        dpa_dev_prefix_only: bool = False,
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
         dpace_token_source: str = "teacher_argmax",  # noqa: S107
@@ -226,6 +228,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             per_position_loss_weight=per_position_loss_weight,
             dpa_dev_signal=dpa_dev_signal,
             dpa_dev_alpha=dpa_dev_alpha,
+            dpa_dev_prefix_only=dpa_dev_prefix_only,
             dpace_alpha=dpace_alpha,
             dpace_dev_accept_prob=dpace_dev_accept_prob,
             dpace_token_source=dpace_token_source,

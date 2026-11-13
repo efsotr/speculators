@@ -112,7 +112,9 @@ def test_shared_weights_gradients_and_reuse(signal):
 @pytest.mark.parametrize(
     "model", [DSparkDraftModel, DFlashDraftModel, DFlash2DraftModel]
 )
-@pytest.mark.parametrize("signal", ["ce", "ce_tmx", "ce_gt", "kl_div2", "accept"])
+@pytest.mark.parametrize(
+    "signal", ["ce", "ce_tmx", "ce_gt", "kl_div2", "accept", "p_draft", "q_draft"]
+)
 def test_cli_and_trainer_roundtrip(model, signal):
     kind = {
         DSparkDraftModel: "dspark",
@@ -133,6 +135,7 @@ def test_cli_and_trainer_roundtrip(model, signal):
             "dpa-dev",
             "--dpa-dev-signal",
             signal,
+            *(["--dpa-dev-prefix-only"] if signal in {"p_draft", "q_draft"} else []),
             "--dpa-dev-alpha",
             "0.3",
         ]
@@ -141,6 +144,7 @@ def test_cli_and_trainer_roundtrip(model, signal):
     for kwargs in model.get_trainer_kwargs(**cfg.flatten()):
         assert kwargs["dpa_dev_signal"] == ("ce" if signal == "ce_tmx" else signal)
         assert kwargs["dpa_dev_alpha"] == pytest.approx(0.3)
+        assert kwargs["dpa_dev_prefix_only"] == (signal in {"p_draft", "q_draft"})
 
 
 @pytest.mark.parametrize("signal", ["ce", "ce_gt", "kl_div2", "kl_div"])
@@ -192,7 +196,9 @@ def test_fused_kl_div2_and_compile():
         )
 
 
-@pytest.mark.parametrize("signal", ["ce", "ce_gt", "kl_div2", "accept"])
+@pytest.mark.parametrize(
+    "signal", ["ce", "ce_gt", "kl_div2", "accept", "p_draft", "q_draft"]
+)
 def test_dflash2_selector_uses_unary_weight(signal):
     q, p, _, mask, ids = inputs()
     candidates, positions, contains = selector_training_candidates(
@@ -219,6 +225,7 @@ def test_dflash2_selector_uses_unary_weight(signal):
         dpa_dev_signal=signal,
         dpa_dev_alpha=0.3,
         data_token_ids=ids,
+        dpa_dev_prefix_only=signal in {"p_draft", "q_draft"},
         dpa_dev_weights=shared,
     )
     unary, _ = compute_metrics(
@@ -234,6 +241,7 @@ def test_dflash2_selector_uses_unary_weight(signal):
         dpa_dev_alpha=0.3,
         data_token_ids=ids,
         sample_from_anchor=False,
+        dpa_dev_prefix_only=signal in {"p_draft", "q_draft"},
     )
     ce = functional.cross_entropy(
         selector.reshape(-1, 3), positions.flatten(), reduction="none"
@@ -356,3 +364,111 @@ def test_ce_tmx_config_alias(spec, weights):
         resolved = resolve_loss_config(spec, impl)
         assert {name: weight for name, (_, weight) in resolved.items()} == weights
         assert resolved["ce"][0] is resolve_loss_config("ce", impl)["ce"][0]
+
+
+@pytest.mark.parametrize("signal", ["p_draft", "q_draft"])
+@pytest.mark.parametrize("prefix_only", [False, True])
+@pytest.mark.parametrize("alpha", [0.3, 1.0])
+def test_ratio_weights(signal, prefix_only, alpha):
+    q, p, _, mask, ids = inputs()
+    config = resolve_loss_config("ce", "eager")
+    terms, weights, _ = prepare_dpa_dev(
+        q,
+        p,
+        mask,
+        4,
+        config,
+        dpa_dev_signal=signal,
+        dpa_dev_alpha=alpha,
+        dpa_dev_prefix_only=prefix_only,
+        data_token_ids=ids,
+        tv_loss_fn=eager.tv_loss,
+    )
+    safe_ids = torch.where(mask.bool(), ids, 0).unsqueeze(-1)
+    qp = q.detach().softmax(-1).gather(-1, safe_ids).squeeze(-1)
+    pp = p.softmax(-1).gather(-1, safe_ids).squeeze(-1)
+    prob = ((qp / pp) if signal == "p_draft" else (pp / qp)).clamp(max=1)
+    expected = reference_weights(prob, mask, alpha)
+    if prefix_only:
+        expected = torch.zeros_like(prob)
+        for start in (0, 4):
+            product = 1.0
+            for i in range(start, start + 4):
+                if mask[0, i]:
+                    expected[0, i] = product
+                    product *= alpha + (1 - alpha) * float(prob[0, i])
+    torch.testing.assert_close(weights, expected)
+    assert not weights.requires_grad
+    actual = (terms["ce"] * weights).sum()
+    reference = (eager.ce_loss(q, p) * expected).sum()
+    torch.testing.assert_close(
+        torch.autograd.grad(actual, q)[0], torch.autograd.grad(reference, q)[0]
+    )
+
+
+@pytest.mark.parametrize("signal", ["ce", "ce_gt", "kl_div2", "accept"])
+def test_prefix_only_rejects_non_ratio(signal):
+    with pytest.raises(ValueError, match="requires p_draft or q_draft"):
+        TrainConfig.model_validate(
+            {
+                "speculator_type": "dspark",
+                "loss": {"loss_fn": '{"ce":1,"ce_gt":1,"kl_div2":1}'},
+                "dflash": {
+                    "per_position_loss_weight": "dpa-dev",
+                    "dpa_dev_signal": signal,
+                    "dpa_dev_prefix_only": True,
+                },
+            }
+        )
+    q, p, _, mask, ids = inputs()
+    with pytest.raises(ValueError, match="requires p_draft or q_draft"):
+        prepare_dpa_dev(
+            q,
+            p,
+            mask,
+            4,
+            resolve_loss_config("ce", "eager"),
+            dpa_dev_signal=signal,
+            dpa_dev_prefix_only=True,
+            data_token_ids=ids,
+        )
+
+
+@pytest.mark.parametrize("signal", ["p_draft", "q_draft"])
+def test_ratio_requires_data_ids(signal):
+    q, p, _, mask, _ = inputs()
+    with pytest.raises(ValueError, match="aligned data_token_ids"):
+        prepare_dpa_dev(
+            q, p, mask, 4, resolve_loss_config("ce", "eager"), dpa_dev_signal=signal
+        )
+
+
+@pytest.mark.parametrize("signal", ["p_draft", "q_draft"])
+def test_prefix_only_fullgraph_cpu(signal):
+    q, p, c, mask, ids = inputs()
+    config = resolve_loss_config("ce", "eager")
+
+    def run(q, p, c, mask, ids):
+        return compute_metrics(
+            q,
+            p,
+            c,
+            mask,
+            4,
+            config,
+            tv_loss_fn=eager.tv_loss,
+            per_position_loss_weight="dpa-dev",
+            dpa_dev_signal=signal,
+            dpa_dev_prefix_only=True,
+            data_token_ids=ids,
+        )[0]
+
+    expected = run(q, p, c, mask, ids)
+    actual = torch.compile(run, backend="eager", fullgraph=True)(q, p, c, mask, ids)
+    torch.testing.assert_close(actual, expected)
+    for a, b in zip(
+        torch.autograd.grad(actual, (q, c)),
+        torch.autograd.grad(expected, (q, c)),
+        strict=True,
+    ):
+        torch.testing.assert_close(a, b)

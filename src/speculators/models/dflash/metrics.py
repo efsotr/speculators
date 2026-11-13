@@ -34,6 +34,7 @@ def compute_metrics(
     per_position_loss_weight: str = "fixed-exp-decay",
     dpa_dev_signal: str = "accept",
     dpa_dev_alpha: float = 0.5,
+    dpa_dev_prefix_only: bool = False,
     dpace_alpha: float = 0.5,
     dpace_dev_accept_prob: str = "q",
     sample_from_anchor: bool = False,
@@ -77,6 +78,7 @@ def compute_metrics(
             loss_config,
             dpa_dev_signal=dpa_dev_signal,
             dpa_dev_alpha=dpa_dev_alpha,
+            dpa_dev_prefix_only=dpa_dev_prefix_only,
             data_token_ids=data_token_ids,
             tv_loss_fn=tv_loss_fn,
         )

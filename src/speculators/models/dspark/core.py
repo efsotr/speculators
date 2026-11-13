@@ -115,6 +115,7 @@ class DSparkDraftModel(DFlashDraftModel):
             "per_position_loss_weight": per_position_loss_weight,
             "dpa_dev_signal": kwargs.get("dpa_dev_signal", "accept"),
             "dpa_dev_alpha": kwargs.get("dpa_dev_alpha", 0.5),
+            "dpa_dev_prefix_only": kwargs.get("dpa_dev_prefix_only", False),
             "dpace_alpha": dpace_alpha,
         }
         return dict(shared), dict(shared)
@@ -136,6 +137,7 @@ class DSparkDraftModel(DFlashDraftModel):
         per_position_loss_weight: str = "fixed-exp-decay",
         dpa_dev_signal: str = "accept",
         dpa_dev_alpha: float = 0.5,
+        dpa_dev_prefix_only: bool = False,
         dpace_alpha: float = 0.5,
         **kwargs,
     ):
@@ -212,6 +214,7 @@ class DSparkDraftModel(DFlashDraftModel):
             per_position_loss_weight=per_position_loss_weight,
             dpa_dev_signal=dpa_dev_signal,
             dpa_dev_alpha=dpa_dev_alpha,
+            dpa_dev_prefix_only=dpa_dev_prefix_only,
             dpace_alpha=dpace_alpha,
             sample_from_anchor=self.config.sample_from_anchor,
             data_token_ids=(
