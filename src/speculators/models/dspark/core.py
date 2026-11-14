@@ -108,6 +108,7 @@ class DSparkDraftModel(DFlashDraftModel):
         dpace_alpha = kwargs.get("dpace_alpha", 0.5)
         shared = {
             "loss_config": loss_config,
+            "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
             "tv_loss_fn": tv_loss_fn,
             "gamma": gamma,
             "max_anchors": max_anchors,
@@ -134,6 +135,7 @@ class DSparkDraftModel(DFlashDraftModel):
         gamma: float = 4.0,
         max_anchors: int = 3072,
         confidence_head_alpha: float = 1.0,
+        loss_normalization: str = "weight_sum",
         per_position_loss_weight: str = "fixed-exp-decay",
         dpa_dev_signal: str = "accept",
         dpa_dev_alpha: float = 0.5,
@@ -211,6 +213,7 @@ class DSparkDraftModel(DFlashDraftModel):
             tv_loss_fn=tv_loss_fn,
             gamma=gamma,
             confidence_head_alpha=confidence_head_alpha,
+            loss_normalization=loss_normalization,
             per_position_loss_weight=per_position_loss_weight,
             dpa_dev_signal=dpa_dev_signal,
             dpa_dev_alpha=dpa_dev_alpha,

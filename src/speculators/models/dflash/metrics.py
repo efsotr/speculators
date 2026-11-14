@@ -31,6 +31,7 @@ def compute_metrics(
     block_size: int = 1,
     gamma: float = 4.0,
     loss_config: LossConfig | None = None,
+    loss_normalization: str = "weight_sum",
     per_position_loss_weight: str = "fixed-exp-decay",
     dpa_dev_signal: str = "accept",
     dpa_dev_alpha: float = 0.5,
@@ -124,6 +125,7 @@ def compute_metrics(
         pos_idx,
         loss_config=loss_config,
         decay_fn=decay_fn,
+        loss_normalization=loss_normalization,
         elementwise_losses=elementwise_losses,
         data_token_ids=data_token_ids,
     )

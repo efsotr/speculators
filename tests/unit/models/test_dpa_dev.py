@@ -93,7 +93,7 @@ def test_shared_weights_gradients_and_reuse(signal):
     weights = reference_weights(prob, mask)
     torch.testing.assert_close(shared["weights"], weights)
     assert not shared["weights"].requires_grad
-    denominator = mask.sum() + 1e-5
+    denominator = (mask * weights).sum() + 1e-5
     reference = sum(
         coef * (terms[name] * weights * mask).sum() / denominator
         for name, (_, coef) in config.items()
@@ -101,7 +101,7 @@ def test_shared_weights_gradients_and_reuse(signal):
     bce = functional.binary_cross_entropy_with_logits(
         c, (1 - terms["tv"]).detach(), reduction="none"
     )
-    reference += (bce * mask * weights).sum() / (mask.sum() + 1e-8)
+    reference += (bce * mask * weights).sum() / ((mask * weights).sum() + 1e-5)
     torch.testing.assert_close(loss, reference)
     actual_grad = torch.autograd.grad(loss, (q, c), retain_graph=True)
     expected_grad = torch.autograd.grad(reference, (q, c))
@@ -246,7 +246,9 @@ def test_dflash2_selector_uses_unary_weight(signal):
     ce = functional.cross_entropy(
         selector.reshape(-1, 3), positions.flatten(), reduction="none"
     ).reshape(1, 8)
-    expected = unary + (ce * mask * shared["weights"]).sum() / (mask.sum() + 1e-5)
+    expected = unary + (ce * mask * shared["weights"]).sum() / (
+        (mask * shared["weights"]).sum() + 1e-5
+    )
     torch.testing.assert_close(loss, expected)
     for actual, reference in zip(
         torch.autograd.grad(loss, (q, selector), retain_graph=True),
@@ -307,11 +309,16 @@ def test_hidden_mse_shared_weights():
         sample_from_anchor=False,
         position_weights=weights,
     )
-    expected = (hidden.square().mean(-1) * weights.detach()).mean()
+    expected = (hidden.square().mean(-1) * weights.detach()).sum() / (
+        weights.detach().sum().clamp_min(1e-5)
+    )
     torch.testing.assert_close(loss, expected)
     grad, weight_grad = torch.autograd.grad(loss, (hidden, weights), allow_unused=True)
     torch.testing.assert_close(
-        grad, hidden.detach() * weights.detach().unsqueeze(-1) / 4
+        grad,
+        hidden.detach()
+        * weights.detach().unsqueeze(-1)
+        / (weights.detach().sum().clamp_min(1e-5)),
     )
     assert weight_grad is None
 
@@ -330,7 +337,9 @@ def test_dflash_accept_without_tv():
         tv_loss_fn=eager.tv_loss,
     )
     weights = reference_weights(1 - eager.tv_loss(q, p), mask, alpha=0.5)
-    expected = (eager.kl_div2_loss(q, p) * mask * weights).sum() / (mask.sum() + 1e-5)
+    expected = (eager.kl_div2_loss(q, p) * mask * weights).sum() / (
+        (mask * weights).sum() + 1e-5
+    )
     torch.testing.assert_close(loss, expected)
 
 

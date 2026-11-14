@@ -82,6 +82,7 @@ def compute_selector_loss(
     *,
     gamma: float,
     per_position_loss_weight: str,
+    loss_normalization: str = "weight_sum",
     dpace_alpha: float,
     sample_from_anchor: bool = False,
     target_probs: torch.Tensor | None = None,
@@ -136,6 +137,7 @@ def compute_selector_loss(
         pos_idx,
         loss_fn=_candidate_cross_entropy,
         decay_fn=decay_fn,
+        loss_normalization=loss_normalization,
     )
 
 
@@ -155,6 +157,7 @@ def compute_metrics(
     tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
     gamma: float = 4.0,
     selector_loss_alpha: float = 1.0,
+    loss_normalization: str = "weight_sum",
     per_position_loss_weight: str = "fixed-exp-decay",
     dpace_alpha: float = 0.5,
     dpace_dev_accept_prob: str = "q",
@@ -185,6 +188,7 @@ def compute_metrics(
         shared_weights=shared_weights,
         dpace_token_source=dpace_token_source,
         data_token_ids=data_token_ids,
+        loss_normalization=loss_normalization,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,
         dpace_dev_accept_prob=dpace_dev_accept_prob,
@@ -227,6 +231,7 @@ def compute_metrics(
         selector_overlap=selector_overlap,
         shared_weight=shared_weights.get("weights"),
         gamma=gamma,
+        loss_normalization=loss_normalization,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,
         dpace_dev_accept_prob=dpace_dev_accept_prob,

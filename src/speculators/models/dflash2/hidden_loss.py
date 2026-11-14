@@ -14,6 +14,7 @@ def predicted_hidden_mse(
     block_size: int,
     sample_from_anchor: bool,
     position_weights: torch.Tensor | None = None,
+    loss_normalization: str = "weight_sum",
 ) -> torch.Tensor:
     """Mean over supervised tokens and channels, with detached teacher targets.
 
@@ -40,4 +41,16 @@ def predicted_hidden_mse(
     weighted_error = squared_error * weights
     if position_weights is not None:
         weighted_error = weighted_error * position_weights.detach()
+    if loss_normalization == "weight_sum":
+        if position_weights is not None:
+            weights = weights * position_weights.detach().float()
+        denominator = weights.sum().detach()
+        world_size = 1
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            torch.distributed.all_reduce(denominator)
+            denominator = denominator / world_size
+        return weighted_error.sum() / denominator.clamp_min(1e-5 / world_size)
+    if loss_normalization != "token_count":
+        raise ValueError(f"Unknown loss_normalization: {loss_normalization}")
     return weighted_error.sum() / weights.sum().clamp_min(1.0)

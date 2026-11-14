@@ -25,6 +25,7 @@ from speculators.losses import (
     dpace_dev_loss_decay,
     dpace_dev_token_probs,
     dpace_loss_decay,
+    loss_function,
     tv_loss,
 )
 from speculators.losses.dpa_dev import prepare_dpa_dev
@@ -37,24 +38,32 @@ __all__ = [
     "compute_metrics",
 ]
 
-_EPS = 1e-8
-
 
 def _masked_decayed_mean(
     elementwise: torch.Tensor,  # [1, T]
     loss_mask: torch.Tensor,  # [1, T]
     pos_idx: torch.Tensor,  # [1, T]
     decay_fn: Callable[..., torch.Tensor] | None,
+    loss_normalization: str = "weight_sum",
 ) -> torch.Tensor:
     """Masked, optionally position-decayed mean of a precomputed per-position term."""
-    loss_mask = loss_mask.to(elementwise.dtype)
-    weighted = elementwise * loss_mask
-    if decay_fn is not None:
-        weighted = weighted * decay_fn(
-            pos_idx.to(weighted.dtype), elementwise_loss=elementwise
+    if loss_normalization == "token_count":
+        mask = loss_mask.to(elementwise.dtype)
+        weight = (
+            1.0
+            if decay_fn is None
+            else decay_fn(pos_idx.to(elementwise.dtype), elementwise_loss=elementwise)
         )
-    denominator = loss_mask.sum(dim=1) + _EPS
-    return (weighted.sum(dim=1) / denominator).mean()
+        return ((elementwise * mask * weight).sum(1) / (mask.sum(1) + 1e-8)).mean()
+    return loss_function(
+        elementwise,
+        elementwise,
+        loss_mask,
+        pos_idx,
+        decay_fn=decay_fn,
+        elementwise_loss=elementwise,
+        loss_normalization=loss_normalization,
+    )
 
 
 def compute_metrics(  # noqa: C901
@@ -67,6 +76,7 @@ def compute_metrics(  # noqa: C901
     tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
     gamma: float = 4.0,
     confidence_head_alpha: float = 1.0,
+    loss_normalization: str = "weight_sum",
     per_position_loss_weight: str = "fixed-exp-decay",
     dpa_dev_signal: str = "accept",
     dpa_dev_alpha: float = 0.5,
@@ -143,6 +153,7 @@ def compute_metrics(  # noqa: C901
         pos_idx,
         loss_config=loss_config,
         decay_fn=decay_fn,
+        loss_normalization=loss_normalization,
         elementwise_losses=elementwise_losses,
         data_token_ids=data_token_ids,
     )
@@ -180,6 +191,7 @@ def compute_metrics(  # noqa: C901
                 if per_position_loss_weight in {"dpa_dev", "dpa-dev"}
                 else confidence_decay_fn
             ),
+            loss_normalization=loss_normalization,
         )
         loss = loss + confidence_head_alpha * conf_loss
 

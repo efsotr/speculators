@@ -129,7 +129,9 @@ def test_token_probabilities_use_teacher_argmax_and_full_vocabulary():
 def _weighted_kl(logits, targets, mask, mode):
     q, p = dpace_dev_token_probs(logits, targets)
     weights = dpace_dev_loss_decay(None, mask, 4, 0.5, q, p, accept_prob=mode)
-    return (kl_div_loss(logits, targets) * weights * mask).sum() / (mask.sum() + 1e-5)
+    return (kl_div_loss(logits, targets) * weights * mask).sum() / (
+        (mask * weights).sum() + 1e-5
+    )
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -144,7 +146,7 @@ def test_kl_gradients_treat_weights_as_constants(mode):
     weights = _reference(q, p, mask, 4, 0.5, mode)
     reference_logits = logits.detach().clone().requires_grad_()
     expected = (kl_div_loss(reference_logits, targets) * weights * mask).sum()
-    expected = expected / (mask.sum() + 1e-5)
+    expected = expected / ((mask * weights).sum() + 1e-5)
     expected_gradient = torch.autograd.grad(expected, reference_logits)[0]
     torch.testing.assert_close(loss, expected)
     torch.testing.assert_close(gradient, expected_gradient)
@@ -218,8 +220,10 @@ def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
     ).reshape_as(mask)
     # Match each loss's existing reduction epsilon.
     unary_expected = (kl_div_loss(unary, teacher) * mask * unary_weights).sum()
-    unary_expected /= mask.sum() + 1e-5
-    selector_expected = (ce * mask * selector_weights).sum() / (mask.sum() + 1e-5)
+    unary_expected /= (mask * unary_weights).sum() + 1e-5
+    selector_expected = (ce * mask * selector_weights).sum() / (
+        (mask * selector_weights).sum() + 1e-5
+    )
     expected = unary_expected + 0.7 * selector_expected
     torch.testing.assert_close(metrics["unary_loss_sum"], unary_expected)
     torch.testing.assert_close(metrics["selector_loss_sum"], selector_expected)
@@ -429,12 +433,12 @@ def test_selector_original_candidates_and_selected_token(source, mode):
     )
     unary_expected = (
         kl_div_loss(unary, teacher) * _reference(q, p, mask, 2, 0.5, mode)
-    ).sum() / (mask.sum() + 1e-5)
+    ).sum() / ((mask * _reference(q, p, mask, 2, 0.5, mode)).sum() + 1e-5)
     ce = torch.nn.functional.cross_entropy(
         training_logits.flatten(0, -2), positions.flatten(), reduction="none"
     ).reshape_as(mask)
     selector_expected = (ce * _reference(selector_q, p, mask, 2, 0.5, mode)).sum() / (
-        mask.sum() + 1e-5
+        (mask * _reference(selector_q, p, mask, 2, 0.5, mode)).sum() + 1e-5
     )
     expected = unary_expected + selector_expected
     actual = run(unary, teacher, training_logits, original_logits)
@@ -491,7 +495,7 @@ def test_dflash_data_token_weights_and_gradients(mode):
     q, p = dpace_dev_token_probs(draft, teacher, ids)
     weights = _reference(q, p, mask, 4, 0.5, mode)
     expected = (kl_div_loss(draft, teacher) * weights * mask).sum() / (
-        mask.sum() + 1e-5
+        (mask * weights).sum() + 1e-5
     )
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(

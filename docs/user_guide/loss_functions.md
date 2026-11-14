@@ -118,3 +118,30 @@ with these two signals. Its weight at position i is the product over j < i
 of `alpha + (1-alpha)*prob_j`, with the empty product equal to 1.
 Masked positions receive zero weight and contribute a factor of 1; products
 restart at each block. The default is false, retaining prefix/suffix weights.
+
+## Loss normalization
+
+`loss.loss_normalization` defaults to `weight_sum` for all position-weighting
+modes (fixed exponential decay, dpace, dpace_dev and dpa_dev):
+
+```yaml
+loss:
+  loss_normalization: weight_sum
+```
+
+For each forward step, the denominator is the sum of detached position weights
+multiplied by the valid-token mask, reduced across the whole local batch and then
+mean-all-reduced across ranks. Each rank divides its weighted loss numerator by
+this common denominator plus `1e-5 / world_size`. DDP's gradient averaging therefore gives the
+global weighted mean. A rank with no valid tokens still participates in the
+collective. This also applies to DSpark confidence, DFlash2 selector and auxiliary
+hidden MSE; each objective uses its own effective weights and valid mask.
+Hidden MSE clamps its denominator to `1e-5 / world_size` instead of adding
+the epsilon. Scaling the epsilon with world size preserves equivalence to the
+same complete batch on one device.
+Compound loss coefficients remain outside this normalization.
+
+`token_count` retains the previous local token-count reduction, including the
+legacy confidence/MSE denominators. The setting is independent of
+`dflash.per_position_loss_weight`. A step here is one model forward; the trainer
+currently performs one forward per optimizer step.

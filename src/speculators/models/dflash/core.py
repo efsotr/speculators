@@ -441,6 +441,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         dpace_alpha = kwargs.get("dpace_alpha", 0.5)
         shared = {
             "loss_config": loss_config,
+            "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
             "gamma": gamma,
             "max_anchors": max_anchors,
             "per_position_loss_weight": per_position_loss_weight,
@@ -778,6 +779,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         loss_config: LossConfig | None = None,
         gamma: float = 4.0,
         max_anchors: int = 512,
+        loss_normalization: str = "weight_sum",
         per_position_loss_weight: str = "fixed-exp-decay",
         dpa_dev_signal: str = "accept",
         dpa_dev_alpha: float = 0.5,
@@ -804,6 +806,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             self.block_size,
             gamma=gamma,
             loss_config=loss_config,
+            loss_normalization=loss_normalization,
             per_position_loss_weight=per_position_loss_weight,
             tv_loss_fn=kwargs.get("tv_loss_fn", tv_loss),
             dpa_dev_signal=dpa_dev_signal,

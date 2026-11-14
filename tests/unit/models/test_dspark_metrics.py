@@ -186,7 +186,9 @@ class TestComputeMetrics:
         positions = torch.arange(8) % 4
         offset = 0 if sample_from_anchor else 1
         weights = torch.exp(-(positions - offset).clamp_min(0) / gamma)
-        expected_loss = (bce * loss_mask * weights).sum() / loss_mask.sum()
+        expected_loss = (bce * loss_mask * weights).sum() / (
+            (loss_mask * weights).sum() + 1e-5
+        )
         confidence_head_alpha = 0.3
         expected_grad = torch.autograd.grad(
             confidence_head_alpha * expected_loss, confidence_logits

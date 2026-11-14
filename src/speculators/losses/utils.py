@@ -329,6 +329,7 @@ def compound_loss(
     *,
     data_token_ids: torch.Tensor | None = None,
     elementwise_losses: dict[str, torch.Tensor] | None = None,
+    loss_normalization: str = "weight_sum",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute a weighted sum of loss terms.
 
@@ -357,6 +358,7 @@ def compound_loss(
             term_targets,
             loss_mask,
             pos_idx,
+            loss_normalization=loss_normalization,
             loss_fn=fn,
             decay_fn=decay_fn,
             elementwise_loss=(
@@ -378,6 +380,7 @@ def loss_function(
     decay_fn: Callable[..., torch.Tensor] | None = None,
     *,
     elementwise_loss: torch.Tensor | None = None,
+    loss_normalization: str = "weight_sum",
 ):
     """Compute masked, optionally position-decayed training loss.
 
@@ -398,13 +401,24 @@ def loss_function(
     loss_mask = loss_mask.to(elementwise_loss.dtype)
     elementwise_loss = elementwise_loss * loss_mask
 
+    effective_weight = loss_mask.detach().float()
     if decay_fn is not None:
         decay_mult = decay_fn(
             pos_idx.to(elementwise_loss.dtype), elementwise_loss=elementwise_loss
         )
         elementwise_loss = elementwise_loss * decay_mult
+        effective_weight = effective_weight * decay_mult.detach().float()
 
+    if loss_normalization == "weight_sum":
+        denominator = effective_weight.sum().detach()
+        world_size = 1
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            # SUM/world_size also supports Gloo, whose AVG is not available.
+            torch.distributed.all_reduce(denominator)
+            denominator = denominator / world_size
+        return elementwise_loss.sum() / (denominator + _LOSS_REDUCTION_EPS / world_size)
+    if loss_normalization != "token_count":
+        raise ValueError(f"Unknown loss_normalization: {loss_normalization}")
     denominator = loss_mask.sum(dim=1) + _LOSS_REDUCTION_EPS
-
-    batch_loss = torch.sum(elementwise_loss, dim=1) / denominator  # shape: [1]
-    return batch_loss.mean()  # shape: []
+    return (elementwise_loss.sum(dim=1) / denominator).mean()

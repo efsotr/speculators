@@ -424,6 +424,11 @@ class LossArgs(_Group):
         description="DFlash2 auxiliary MSE weight for hidden states at predicted "
         "token positions. Zero disables the objective.",
     )
+    loss_normalization: Literal["weight_sum", "token_count"] = Field(
+        default="weight_sum",
+        description="Loss denominator: mean-all-reduced step weight sum (default), "
+        "or legacy local token count. Applies to every position weighting mode.",
+    )
     loss_implementation: Literal["fused", "eager"] = Field(
         default="fused",
         description="Loss implementation to use; eager is for compatibility and "
