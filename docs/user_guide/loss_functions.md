@@ -158,7 +158,7 @@ Here q is drafter and p is target; token signals use aligned dataset tokens,
 with the same anchor alignment as ce_gt. They do not require ce_gt in loss_fn.
 
 Smooth probabilities with `r_i=alpha+(1-alpha)*prob_i`, using
-`dpa_dev_alpha` (framework default 0.5, range (0,1]).
+`dpa_dev_alpha` (framework default 0.5, range [0,1]); zero disables smoothing.
 Within each block, `P_0=1`, `P_i=P_{i-1}*r_{i-1}`,
 `S_last=1`, `S_i=1+r_{i+1}*S_{i+1}`, and `W_i=P_i*S_i`.
 Thus neither factor includes the current probability.

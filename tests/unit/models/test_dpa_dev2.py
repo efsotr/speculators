@@ -13,7 +13,7 @@ from speculators.train.config import TrainConfig
 
 
 @pytest.mark.parametrize("prefix_only", [False, True])
-@pytest.mark.parametrize("alpha", [0.3, 1.0])
+@pytest.mark.parametrize("alpha", [0.0, 0.3, 1.0])
 @pytest.mark.parametrize("size", [1, 4, 16])
 def test_scan_reference(prefix_only, alpha, size):
     torch._dynamo.reset()
@@ -143,3 +143,46 @@ def test_trainer_roundtrip(kind, signal):
         assert kwargs["per_position_loss_weight"] == "dpa-dev2"
         assert kwargs["dpa_dev_signal"] == ("accept" if signal == "acc" else signal)
         assert kwargs["dpa_dev_prefix_only"]
+
+
+def test_zero_smoothing_cpu():
+    from unittest.mock import patch
+
+    from speculators.losses.dpa_dev import _compose_affine
+
+    # CPU reference for the GPU-only scan; exercise prepare and zero factors.
+    def scan_reference(combine, values, dim, reverse, combine_mode):
+        assert combine is _compose_affine and dim == 1 and reverse
+        a, b = values
+        out_a, out_b = a.clone(), b.clone()
+        for i in range(a.shape[1] - 2, -1, -1):
+            out_a[:, i], out_b[:, i] = combine(
+                (out_a[:, i + 1], out_b[:, i + 1]), (a[:, i], b[:, i])
+            )
+        return out_a, out_b
+
+    cfg = TrainConfig.resolve([
+        "--verifier-name-or-path", "dummy", "--speculator-type", "dspark",
+        "--per-position-loss-weight", "dpa-dev2", "--dpa-dev-alpha", "0",
+    ])
+    assert cfg.dflash.dpa_dev_alpha == 0
+    with pytest.raises(SystemExit):
+        TrainConfig.resolve([
+            "--verifier-name-or-path", "dummy", "--speculator-type", "dspark",
+            "--per-position-loss-weight", "dpa-dev", "--dpa-dev-alpha", "0",
+        ])
+    prob = torch.tensor([[0.5, 0.0, 0.8, 0.2]])
+    with patch("speculators.losses.dpa_dev.associative_scan", scan_reference):
+        actual = dpa_dev2_weights(prob, torch.ones_like(prob), 4, 0.0)
+        torch.testing.assert_close(actual, torch.tensor([[1.0, 0.98, 0.0, 0.0]]))
+        logits = torch.randn(1, 4, 7, requires_grad=True)
+        terms, weights, _ = prepare_dpa_dev(
+            logits, torch.randn_like(logits), torch.ones(1, 4), 4,
+            resolve_loss_config('{"ce_gt":0.1,"tv":1.8}', 'eager'),
+            dpa_dev2=True, dpa_dev_signal="p_draft", dpa_dev_alpha=0.0,
+            data_token_ids=torch.zeros(1, 4, dtype=torch.long),
+        )
+        assert torch.isfinite(weights).all() and not weights.requires_grad
+        loss = sum((term * weights).sum() for term in terms.values())
+        loss.backward()
+        assert torch.isfinite(logits.grad).all()

@@ -709,7 +709,7 @@ class DFlashArgs(_Group):
         description="Exclusive prefix weights; dpa-dev requires p_draft or q_draft; "
         "dpa-dev2 supports every signal.",
     )
-    dpa_dev_alpha: float = Field(default=0.5, gt=0.0, le=1.0)
+    dpa_dev_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
     dpace_token_source: Literal["teacher_argmax", "data"] = Field(
         default="teacher_argmax",
         description="Token used for dpace_dev q/p: teacher argmax or aligned "
@@ -1072,6 +1072,8 @@ class TrainConfig(BaseSettings):
             }:
                 raise ValueError("dpa-dev2 requires q, p, q_draft, p_draft or acc")
         if self.dflash.per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+            if self.dflash.dpa_dev_alpha == 0.0:
+                raise ValueError("dpa-dev requires dpa_dev_alpha in (0, 1]")
             if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
                 raise ValueError("dpa-dev requires dflash, dflash2 or dspark")
             signal = self.dflash.dpa_dev_signal

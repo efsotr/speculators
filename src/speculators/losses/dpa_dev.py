@@ -54,8 +54,8 @@ def prepare_dpa_dev(  # noqa: C901
         raise ValueError(
             f"dpa_dev_signal={dpa_dev_signal} requires that loss in loss_fn"
         )
-    if not 0.0 < dpa_dev_alpha <= 1.0:
-        raise ValueError("dpa_dev_alpha must be in (0, 1]")
+    if not (0.0 <= dpa_dev_alpha <= 1.0 if dpa_dev2 else 0.0 < dpa_dev_alpha <= 1.0):
+        raise ValueError("dpa_dev_alpha must be in [0, 1] for dpa-dev2 or (0, 1] for dpa-dev")
     terms = {}
     for name, (fn, _) in loss_config.items():
         labels = targets
