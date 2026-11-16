@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from functools import partial
 
 import torch
 
@@ -319,7 +320,7 @@ def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
     return config
 
 
-def compound_loss(
+def compound_loss(  # noqa: PLR0917
     logits: torch.Tensor,
     targets: torch.Tensor,
     loss_mask: torch.Tensor,
@@ -344,6 +345,12 @@ def compound_loss(
     total = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
     term_losses: dict[str, torch.Tensor] = {}
     multi = len(loss_config) > 1
+    base_decay_fn = decay_fn
+    while isinstance(base_decay_fn, partial):
+        base_decay_fn = base_decay_fn.func
+    if multi and base_decay_fn is dpace_loss_decay:
+        raise ValueError("Compound loss does not support loss-dependent dpace weights")
+    reduction = None
     for name, (fn, weight) in loss_config.items():
         term_targets = targets
         if name == "ce_gt":
@@ -353,25 +360,26 @@ def compound_loss(
                 raise ValueError("ce_gt data_token_ids must match logits positions")
             # Masked positions may contain padding/sentinel IDs. Never gather them.
             term_targets = torch.where(loss_mask.bool(), data_token_ids, 0)
-        term = loss_function(
-            logits,
-            term_targets,
-            loss_mask,
-            pos_idx,
-            loss_normalization=loss_normalization,
-            loss_fn=fn,
-            decay_fn=decay_fn,
-            elementwise_loss=(
-                None if elementwise_losses is None else elementwise_losses[name]
-            ),
+        elementwise = (
+            fn(logits, term_targets)
+            if elementwise_losses is None
+            else elementwise_losses[name]
         )
+        if reduction is None:
+            reduction = _prepare_loss_reduction(
+                elementwise, loss_mask, pos_idx, decay_fn, loss_normalization
+            )
+        total = total + weight * elementwise
         if multi:
-            term_losses[f"{name}_loss"] = term.detach()
-        total = total + weight * term
+            term_losses[f"{name}_loss"] = _reduce_loss(
+                elementwise.detach(), reduction, loss_normalization
+            ).detach()
+    if reduction is not None:
+        total = _reduce_loss(total, reduction, loss_normalization)
     return total, term_losses
 
 
-def loss_function(
+def loss_function(  # noqa: PLR0917
     logits: torch.Tensor,  # shape: [1, seq_len, draft_vocab_size]
     targets: torch.Tensor,  # shape: [1, seq_len, draft_vocab_size]
     loss_mask: torch.Tensor,  # shape: [1, seq_len]
@@ -398,27 +406,44 @@ def loss_function(
     if elementwise_loss is None:
         elementwise_loss = loss_fn(logits, targets)  # shape: [1, seq_len]
 
-    loss_mask = loss_mask.to(elementwise_loss.dtype)
-    elementwise_loss = elementwise_loss * loss_mask
+    reduction = _prepare_loss_reduction(
+        elementwise_loss, loss_mask, pos_idx, decay_fn, loss_normalization
+    )
+    return _reduce_loss(elementwise_loss, reduction, loss_normalization)
 
-    effective_weight = loss_mask.detach().float()
+
+def _prepare_loss_reduction(
+    elementwise_loss, loss_mask, pos_idx, decay_fn, normalization
+):
+    """Prepare shared mask, multiplier and detached normalization once."""
+    mask = loss_mask.to(elementwise_loss.dtype)
+    multiplier = None
+    effective_weight = mask.detach().float()
     if decay_fn is not None:
-        decay_mult = decay_fn(
-            pos_idx.to(elementwise_loss.dtype), elementwise_loss=elementwise_loss
+        multiplier = decay_fn(
+            pos_idx.to(elementwise_loss.dtype), elementwise_loss=elementwise_loss * mask
         )
-        elementwise_loss = elementwise_loss * decay_mult
-        effective_weight = effective_weight * decay_mult.detach().float()
-
-    if loss_normalization == "weight_sum":
+        effective_weight = effective_weight * multiplier.detach().float()
+    if normalization == "weight_sum":
         denominator = effective_weight.sum().detach()
         world_size = 1
         if torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
-            # SUM/world_size also supports Gloo, whose AVG is not available.
             torch.distributed.all_reduce(denominator)
             denominator = denominator / world_size
-        return elementwise_loss.sum() / (denominator + _LOSS_REDUCTION_EPS / world_size)
-    if loss_normalization != "token_count":
-        raise ValueError(f"Unknown loss_normalization: {loss_normalization}")
-    denominator = loss_mask.sum(dim=1) + _LOSS_REDUCTION_EPS
-    return (elementwise_loss.sum(dim=1) / denominator).mean()
+        denominator = denominator + _LOSS_REDUCTION_EPS / world_size
+    elif normalization == "token_count":
+        denominator = mask.sum(dim=1) + _LOSS_REDUCTION_EPS
+    else:
+        raise ValueError(f"Unknown loss_normalization: {normalization}")
+    return mask, multiplier, denominator
+
+
+def _reduce_loss(elementwise_loss, reduction, normalization):
+    mask, multiplier, denominator = reduction
+    weighted_loss = elementwise_loss * mask.to(elementwise_loss.dtype)
+    if multiplier is not None:
+        weighted_loss = weighted_loss * multiplier
+    if normalization == "weight_sum":
+        return weighted_loss.sum() / denominator
+    return (weighted_loss.sum(dim=1) / denominator).mean()

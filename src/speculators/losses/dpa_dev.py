@@ -73,10 +73,25 @@ def prepare_dpa_dev(  # noqa: C901
         accept = (1.0 - tv).clamp(0.0, 1.0)
         if ratio_signal:
             ids = torch.where(loss_mask.bool(), data_token_ids, 0)
-            q, p = dpace_dev_token_probs(logits, targets, ids)
+            if dpa_dev2 and dpa_dev_signal in {"p_draft", "q_draft"}:
+                gather_ids = ids.unsqueeze(-1)
+                log_q = (
+                    logits.gather(-1, gather_ids).squeeze(-1).float()
+                    - logits.float().logsumexp(-1)
+                )
+                log_p = (
+                    targets.gather(-1, gather_ids).squeeze(-1).float()
+                    - targets.float().logsumexp(-1)
+                )
+                log_ratio = (
+                    log_q - log_p if dpa_dev_signal == "p_draft" else log_p - log_q
+                )
+                probability = log_ratio.clamp(max=0.0).exp()
+            else:
+                q, p = dpace_dev_token_probs(logits, targets, ids)
             if dpa_dev_signal in {"q", "p"}:
                 probability = q if dpa_dev_signal == "q" else p
-            else:
+            elif not dpa_dev2:
                 numerator, denominator = (
                     (q, p) if dpa_dev_signal == "p_draft" else (p, q)
                 )

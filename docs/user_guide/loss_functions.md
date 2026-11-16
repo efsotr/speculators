@@ -139,7 +139,12 @@ hidden MSE; each objective uses its own effective weights and valid mask.
 Hidden MSE clamps its denominator to `1e-5 / world_size` instead of adding
 the epsilon. Scaling the epsilon with world size preserves equivalence to the
 same complete batch on one device.
-Compound loss coefficients remain outside this normalization.
+Compound loss computes its shared position weights and normalization denominator
+once, including a single denominator all-reduce, then reuses them for every
+configured term. The coefficient-weighted elementwise losses are added before
+the shared weighting and final normalization; logged terms use the same denominator. Original
+`dpace` derives weights from the individual loss and is not supported with
+compound loss; use `dpa_dev` or `dpa-dev2` for compound dynamic weights.
 
 `token_count` retains the previous local token-count reduction, including the
 legacy confidence/MSE denominators. The setting is independent of
@@ -167,3 +172,7 @@ Masked positions have zero weight and are skipped by both recurrences.
 S uses PyTorch associative_scan over affine compositions; PyTorch 2.13 exposes
 this through `torch._higher_order_ops.associative_scan`, with CUDA/Inductor
 support. No division by prefix products is used.
+
+DPA-dev2 ratio signals use `exp(min(log_q - log_p, 0))` for p_draft
+and `exp(min(log_p - log_q, 0))` for q_draft, computing log probabilities
+in fp32 before exponentiation to avoid probability-ratio underflow.

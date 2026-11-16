@@ -1,5 +1,7 @@
 """Step weight normalization, including unequal distributed rank weights."""
 
+from functools import partial
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -7,7 +9,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel
 
 from speculators.losses import resolve_loss_config
-from speculators.losses.utils import loss_function
+from speculators.losses.utils import compound_loss, dpace_loss_decay, loss_function
 from speculators.models.dflash.core import DFlashDraftModel
 from speculators.models.dflash2.core import DFlash2DraftModel
 from speculators.models.dspark.core import DSparkDraftModel
@@ -150,3 +152,59 @@ def test_cuda_ddp_matches_same_single_gpu_batch(tmp_path):
     mp.spawn(
         _cuda_ddp_worker, args=(f"file://{tmp_path / 'cuda_rendezvous'}",), nprocs=2
     )
+
+
+@pytest.mark.parametrize("mode", ["weight_sum", "token_count"])
+def test_compound_shares_weight_and_denominator(monkeypatch, mode):
+    values = torch.tensor([[2.0, 4.0, 7.0]], requires_grad=True)
+    mask = torch.tensor([[1.0, 1.0, 0.0]])
+    weights = torch.tensor([[0.2, 0.8, 0.5]])
+    calls = {"weight": 0, "reduce": 0}
+
+    def decay(*args, **kwargs):
+        calls["weight"] += 1
+        return weights
+
+    def reduce(denominator):
+        calls["reduce"] += 1
+        denominator.mul_(2)
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "all_reduce", reduce)
+    actual, terms = compound_loss(
+        values,
+        values,
+        mask,
+        torch.zeros_like(mask),
+        {"first": (lambda x, y: x, 0.3), "second": (lambda x, y: x.square(), 1.7)},
+        decay_fn=decay,
+        loss_normalization=mode,
+    )
+    denominator = (
+        (mask * weights).sum() + 1e-5 / 2 if mode == "weight_sum" else mask.sum() + 1e-5
+    )
+    expected = (
+        (0.3 * values + 1.7 * values.square()) * mask * weights
+    ).sum() / denominator
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual, values)[0], torch.autograd.grad(expected, values)[0]
+    )
+    assert calls == {"weight": 1, "reduce": int(mode == "weight_sum")}
+    assert set(terms) == {"first_loss", "second_loss"}
+
+
+def test_compound_rejects_original_dpace():
+    values = torch.ones(1, 4)
+    with pytest.raises(ValueError, match="loss-dependent dpace"):
+        compound_loss(
+            values,
+            values,
+            values,
+            values,
+            {"ce": (lambda x, y: x, 1.0), "tv": (lambda x, y: x, 1.0)},
+            decay_fn=partial(
+                dpace_loss_decay, loss_mask=values, block_size=4, dpace_alpha=0.5
+            ),
+        )

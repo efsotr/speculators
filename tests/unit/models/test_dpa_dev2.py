@@ -186,3 +186,20 @@ def test_zero_smoothing_cpu():
         loss = sum((term * weights).sum() for term in terms.values())
         loss.backward()
         assert torch.isfinite(logits.grad).all()
+
+
+@pytest.mark.parametrize("signal", ["p_draft", "q_draft"])
+@pytest.mark.parametrize("delta", [-2.0, 0.0, 2.0])
+def test_ratio_log_space_underflow(signal, delta):
+    q = torch.tensor([[[-1000.0 + delta, 0.0]]]).expand(1, 2, 2)
+    p = torch.tensor([[[-1000.0, 0.0]]]).expand_as(q)
+    _, weights, _ = prepare_dpa_dev(
+        q, p, torch.ones(1, 2), 2, resolve_loss_config("ce", "eager"),
+        dpa_dev2=True, dpa_dev_signal=signal, dpa_dev_alpha=0.0,
+        dpa_dev_prefix_only=True, data_token_ids=torch.zeros(1, 2, dtype=torch.long),
+        tv_loss_fn=lambda q, p: torch.zeros(q.shape[:-1]),
+    )
+    log_ratio = delta if signal == "p_draft" else -delta
+    expected = torch.tensor([[1.0, min(log_ratio, 0.0)]] )
+    expected[:, 1] = expected[:, 1].exp()
+    torch.testing.assert_close(weights, expected)
