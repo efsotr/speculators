@@ -70,13 +70,14 @@ def compute_metrics(
     pos_idx = pos_idx.unsqueeze(0)  # shape: [1, T]
 
     elementwise_losses = None
-    if per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+    if per_position_loss_weight in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}:
         elementwise_losses, weights, _accept_rate = prepare_dpa_dev(
             logits,
             targets,
             loss_mask,
             block_size,
             loss_config,
+            dpa_dev2=per_position_loss_weight in {"dpa_dev2", "dpa-dev2"},
             dpa_dev_signal=dpa_dev_signal,
             dpa_dev_alpha=dpa_dev_alpha,
             dpa_dev_prefix_only=dpa_dev_prefix_only,

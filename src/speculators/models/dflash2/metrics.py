@@ -96,7 +96,7 @@ def compute_selector_loss(
         torch.arange(candidate_logits.shape[1], device=candidate_logits.device)
         % block_size
     ).unsqueeze(0)
-    if per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+    if per_position_loss_weight in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}:
         if shared_weight is None:
             raise ValueError("dpa-dev selector requires shared unary weights")
 

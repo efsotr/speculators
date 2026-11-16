@@ -666,7 +666,16 @@ class DFlashArgs(_Group):
         default=4.0, description="Decay gamma for DFlash-family loss weighting."
     )
     per_position_loss_weight: (
-        Literal["fixed-exp-decay", "dpace", "dpace_dev", "dpa_dev", "dpa-dev"] | None
+        Literal[
+            "fixed-exp-decay",
+            "dpace",
+            "dpace_dev",
+            "dpa_dev",
+            "dpa-dev",
+            "dpa_dev2",
+            "dpa-dev2",
+        ]
+        | None
     ) = Field(
         default=None,
         description="Per-position loss weighting: fixed-exp-decay, dpace, or "
@@ -675,20 +684,30 @@ class DFlashArgs(_Group):
         "(default: dpace for dflash, fixed-exp-decay otherwise).",
     )
     dpa_dev_signal: Literal[
-        "ce", "ce_tmx", "ce_gt", "kl_div2", "accept", "p_draft", "q_draft"
+        "ce",
+        "ce_tmx",
+        "ce_gt",
+        "kl_div2",
+        "accept",
+        "p_draft",
+        "q_draft",
+        "q",
+        "p",
+        "acc",
     ] = Field(
         default="accept",
-        description="Shared DPA-dev weight signal; loss signals must occur in loss_fn.",
+        description="Shared DPA-dev/dev2 weight signal; loss signals must occur in loss_fn.",
     )
 
     @field_validator("dpa_dev_signal", mode="before")
     @classmethod
     def _normalize_dpa_dev_signal(cls, v: str) -> str:
-        return "ce" if v == "ce_tmx" else v
+        return {"ce_tmx": "ce", "acc": "accept"}.get(v, v)
 
     dpa_dev_prefix_only: bool = Field(
         default=False,
-        description="Exclusive prefix weights; requires p_draft or q_draft.",
+        description="Exclusive prefix weights; dpa-dev requires p_draft or q_draft; "
+        "dpa-dev2 supports every signal.",
     )
     dpa_dev_alpha: float = Field(default=0.5, gt=0.0, le=1.0)
     dpace_token_source: Literal["teacher_argmax", "data"] = Field(
@@ -1041,10 +1060,23 @@ class TrainConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_dpa_dev(self) -> "TrainConfig":
+        if self.dflash.per_position_loss_weight in {"dpa_dev2", "dpa-dev2"}:
+            if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
+                raise ValueError("dpa-dev2 requires dflash, dflash2 or dspark")
+            if self.dflash.dpa_dev_signal not in {
+                "q",
+                "p",
+                "q_draft",
+                "p_draft",
+                "accept",
+            }:
+                raise ValueError("dpa-dev2 requires q, p, q_draft, p_draft or acc")
         if self.dflash.per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
             if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
                 raise ValueError("dpa-dev requires dflash, dflash2 or dspark")
             signal = self.dflash.dpa_dev_signal
+            if signal in {"q", "p"}:
+                raise ValueError("q/p signals require dpa-dev2")
             losses = resolve_loss_config(self.loss.loss_fn)
             if self.dflash.dpa_dev_prefix_only and signal not in {"p_draft", "q_draft"}:
                 raise ValueError("dpa_dev_prefix_only requires p_draft or q_draft")
@@ -1074,10 +1106,9 @@ class TrainConfig(BaseSettings):
                 raise ValueError(
                     f"--dpace-alpha must be in (0, 1], got {self.dflash.dpace_alpha}"
                 )
-        if (
-            "ce_gt" in resolve_loss_config(self.loss.loss_fn)
-            and self.speculator_type not in {"dflash", "dflash2", "dspark"}
-        ):
+        if "ce_gt" in resolve_loss_config(
+            self.loss.loss_fn
+        ) and self.speculator_type not in {"dflash", "dflash2", "dspark"}:
             raise ValueError("ce_gt requires dflash, dflash2 or dspark")
         return self
 

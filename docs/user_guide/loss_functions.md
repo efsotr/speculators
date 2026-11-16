@@ -145,3 +145,25 @@ Compound loss coefficients remain outside this normalization.
 legacy confidence/MSE denominators. The setting is independent of
 `dflash.per_position_loss_weight`. A step here is one model forward; the trainer
 currently performs one forward per optimizer step.
+
+### DPA-dev2
+
+Set `dflash.per_position_loss_weight: dpa-dev2` (alias `dpa_dev2`).
+DFlash, DFlash2 and DSpark share detached fp32 weights across all configured
+losses, confidence, selector and hidden MSE, using the existing normalization.
+
+Reuse `dpa_dev_signal`: `q`, `p`, `q_draft=min(1,p/q)`,
+`p_draft=min(1,q/p)`, or `acc=1-TV` (alias `accept`, framework default).
+Here q is drafter and p is target; token signals use aligned dataset tokens,
+with the same anchor alignment as ce_gt. They do not require ce_gt in loss_fn.
+
+Smooth probabilities with `r_i=alpha+(1-alpha)*prob_i`, using
+`dpa_dev_alpha` (framework default 0.5, range (0,1]).
+Within each block, `P_0=1`, `P_i=P_{i-1}*r_{i-1}`,
+`S_last=1`, `S_i=1+r_{i+1}*S_{i+1}`, and `W_i=P_i*S_i`.
+Thus neither factor includes the current probability.
+`dpa_dev_prefix_only: true` uses W=P for every supported signal.
+Masked positions have zero weight and are skipped by both recurrences.
+S uses PyTorch associative_scan over affine compositions; PyTorch 2.13 exposes
+this through `torch._higher_order_ops.associative_scan`, with CUDA/Inductor
+support. No division by prefix products is used.

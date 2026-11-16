@@ -95,13 +95,14 @@ def compute_metrics(  # noqa: C901
     pos_idx = (torch.arange(seq_len, device=device) % block_size).unsqueeze(0)
     start_pos = 0 if sample_from_anchor else 1
     elementwise_losses = None
-    if per_position_loss_weight in {"dpa_dev", "dpa-dev"}:
+    if per_position_loss_weight in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}:
         elementwise_losses, weights, accept_rate = prepare_dpa_dev(
             logits,
             targets,
             loss_mask,
             block_size,
             loss_config,
+            dpa_dev2=per_position_loss_weight in {"dpa_dev2", "dpa-dev2"},
             dpa_dev_signal=dpa_dev_signal,
             dpa_dev_alpha=dpa_dev_alpha,
             dpa_dev_prefix_only=dpa_dev_prefix_only,
@@ -161,7 +162,12 @@ def compute_metrics(  # noqa: C901
     # Analytical per-position acceptance rate = distributional overlap
     # = 1 - TV; the fused kernel avoids the two full-vocab fp32 softmaxes.
     with torch.no_grad():
-        if per_position_loss_weight not in {"dpa_dev", "dpa-dev"}:
+        if per_position_loss_weight not in {
+            "dpa_dev",
+            "dpa-dev",
+            "dpa_dev2",
+            "dpa-dev2",
+        }:
             accept_rate = 1.0 - tv_loss_fn(logits, targets)  # [1, T]
         # Per-block cumulative acceptance product over the draft slots (slot 0
         # is the anchor), shared by the accept-length and calibration metrics.
@@ -188,7 +194,8 @@ def compute_metrics(  # noqa: C901
             pos_idx,
             (
                 decay_fn
-                if per_position_loss_weight in {"dpa_dev", "dpa-dev"}
+                if per_position_loss_weight
+                in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}
                 else confidence_decay_fn
             ),
             loss_normalization=loss_normalization,
