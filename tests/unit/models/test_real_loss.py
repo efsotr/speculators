@@ -34,8 +34,19 @@ def test_real_schema(kind):
             "loss": {"loss_fn": '{"REAL": 0.7, "ce_gt": 0.3}'},
         }
     )
+    assert cfg.loss.loss_normalization == "token_count"
     assert resolve_loss_config(cfg.loss.loss_fn)["ce_gt"][1] == 0.3
     assert resolve_loss_config("REAL")["ce_gt"][1] == 0.1
+
+
+def test_real_schema_rejects_weight_sum():
+    with pytest.raises(ValueError, match="REAL requires loss_normalization=token_count"):
+        TrainConfig.model_validate(
+            {
+                "speculator_type": "dspark",
+                "loss": {"loss_fn": "REAL", "loss_normalization": "weight_sum"},
+            }
+        )
 
 
 def test_real_schema_rejects_unaligned_model():
@@ -50,11 +61,10 @@ def test_real_schema_rejects_unaligned_model():
 
 def reference_loss(logits, targets, ids, mask, start):
     draft, teacher = logits[0].softmax(-1), targets[0].detach().softmax(-1)
-    branch_losses = []
+    rewards = []
     ce_losses = []
     for block in range(0, logits.shape[1], 4):
         survival = 1.0
-        rewards = []
         for slot in range(block + start, block + 4):
             if not mask[0, slot]:
                 break
@@ -67,12 +77,10 @@ def reference_loss(logits, targets, ids, mask, start):
                     logits[0, slot : slot + 1], ids[0, slot : slot + 1]
                 )
             )
-        if rewards:
-            branch_losses.append(1 - torch.stack(rewards).sum() / (4 - start))
     zero = logits.sum() * 0
-    if not branch_losses:
+    if not rewards:
         return zero, zero
-    return torch.stack(branch_losses).mean(), torch.stack(ce_losses).mean()
+    return (1 - torch.stack(rewards)).mean(), torch.stack(ce_losses).mean()
 
 
 @pytest.mark.parametrize(

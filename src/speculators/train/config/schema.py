@@ -1095,6 +1095,11 @@ class TrainConfig(BaseSettings):
         """Validate the objectives and smoothing supported by each D-PACE mode."""
         losses = resolve_loss_config(self.loss.loss_fn)
         if TRAJECTORY_LOSSES.intersection(losses):
+            if "REAL" in losses:
+                if "loss_normalization" not in self.loss.model_fields_set:
+                    self.loss.loss_normalization = "token_count"
+                elif self.loss.loss_normalization != "token_count":
+                    raise ValueError("REAL requires loss_normalization=token_count")
             if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
                 raise ValueError("Trajectory losses require dflash, dflash2 or dspark")
             if (

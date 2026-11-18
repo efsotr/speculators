@@ -183,6 +183,7 @@ For DFlash, DFlash2 and DSpark with the verifier vocabulary, set:
 
 ```yaml
 loss:
+  loss_normalization: token_count
   loss_fn: '{"REAL": 0.9, "ce_gt": 0.1}'
 ```
 
@@ -195,7 +196,9 @@ DFlash2's DPA-dev and DPA-dev2 selector modes require a tokenwise unary loss.
 At each prediction slot, REAL multiplies the draft/target distribution overlap
 by the product of earlier dataset-token acceptance ratios
 `min(1, q(token) / p(token))`, where q is the draft and p is the teacher.
-The loss is one minus the sum of these contributions divided by the full
-prediction window, then averaged over nonempty blocks. The first masked slot
-or document boundary ends a trajectory. The CE component averages over those
-same valid prediction tokens. Both components are zero for an empty batch.
+The first masked slot or document boundary ends a trajectory. The REAL
+component averages one minus the contribution at each valid prediction
+slot, and the CE component averages over the same slots. Both use the local
+valid token count, without a denominator collective, and are zero for an
+empty batch. Training configs with REAL default to `token_count` and reject
+`weight_sum`.

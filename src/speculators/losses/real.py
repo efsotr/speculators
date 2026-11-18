@@ -22,7 +22,7 @@ def trajectory_loss(
     tv_loss_fn,
     ce_weight,
 ):
-    """Use fixed window normalization and uniform means over nonempty blocks."""
+    """Compute trajectory losses over the valid prefix of each block."""
     if token_ids is None or token_ids.shape != logits.shape[:-1]:
         raise ValueError("Trajectory losses require aligned data_token_ids")
     if logits.shape != targets.shape:
@@ -42,12 +42,12 @@ def trajectory_loss(
     log_ratio = log_q - observed_log_probability(p, ids)
     log_b = torch.where(valid, log_ratio.clamp(max=0.0), 0.0)
     inclusive = log_b.cumsum(-1)
-    denominator = valid.any(-1).sum().clamp_min(1) * window
     exclusive = torch.cat((torch.zeros_like(inclusive[:, :1]), inclusive[:, :-1]), -1)
     tv = tv_loss_fn(logits, targets).reshape(-1, block_size)[:, start_pos:]
     branch = torch.where(valid, exclusive.exp() * (1.0 - tv), 0.0)
-    objective = valid.any().float() - branch.sum() / denominator
-    ce = torch.where(valid, -log_q, 0.0).sum() / valid.sum().clamp_min(1)
+    denominator = valid.sum().clamp_min(1)
+    objective = torch.where(valid, 1.0 - branch, 0.0).sum() / denominator
+    ce = torch.where(valid, -log_q, 0.0).sum() / denominator
     return (1.0 - ce_weight) * objective + ce_weight * ce, {
         "real_branch_loss": objective.detach(),
         "ce_gt_loss": ce.detach(),
