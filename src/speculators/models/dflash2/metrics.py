@@ -171,6 +171,8 @@ def compute_metrics(
     dpa_dev_weights: dict | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine the unary DFlash objective with a K-way selector objective."""
+    if "REAL" in loss_config:
+        per_position_loss_weight = "fixed-exp-decay"
     shared_weights = {}
     unary_loss, metrics = compute_unary_metrics(
         unary_logits,

@@ -21,6 +21,7 @@ def trajectory_loss(
     start_pos,
     tv_loss_fn,
     ce_weight,
+    ce_position_weights=None,
 ):
     """Compute trajectory losses over the valid prefix of each block."""
     if token_ids is None or token_ids.shape != logits.shape[:-1]:
@@ -47,7 +48,10 @@ def trajectory_loss(
     branch = torch.where(valid, exclusive.exp() * (1.0 - tv), 0.0)
     denominator = valid.sum().clamp_min(1)
     objective = torch.where(valid, 1.0 - branch, 0.0).sum() / denominator
-    ce = torch.where(valid, -log_q, 0.0).sum() / denominator
+    ce = torch.where(valid, -log_q, 0.0)
+    if ce_position_weights is not None:
+        ce = ce * ce_position_weights.reshape(-1, block_size)[:, start_pos:]
+    ce = ce.sum() / denominator
     return (1.0 - ce_weight) * objective + ce_weight * ce, {
         "real_branch_loss": objective.detach(),
         "ce_gt_loss": ce.detach(),

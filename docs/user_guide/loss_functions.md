@@ -190,7 +190,8 @@ loss:
 The two coefficients must be in [0, 1] and sum to 1.
 `ce_gt` is the CE mixing coefficient lambda, and `REAL` is its complement.
 The shorthand `REAL` uses the weights in the example.
-The trainer's confidence and selector losses retain their own coefficients.
+The trainer's confidence and selector losses retain their own coefficients
+and use fixed exponential position decay with REAL.
 DFlash2's DPA-dev and DPA-dev2 selector modes require a tokenwise unary loss.
 
 At each prediction slot, REAL multiplies the draft/target distribution overlap
@@ -198,7 +199,9 @@ by the product of earlier dataset-token acceptance ratios
 `min(1, q(token) / p(token))`, where q is the draft and p is the teacher.
 The first masked slot or document boundary ends a trajectory. The REAL
 component averages one minus the contribution at each valid prediction
-slot, and the CE component averages over the same slots. Both use the local
+slot. The CE component weights those same slots by `exp(-i / gamma)`,
+where `i=0` is the first prediction and `gamma` is `dflash_decay_gamma`
+(default 4.0). Both use the local
 valid token count, without a denominator collective, and are zero for an
 empty batch. Training configs with REAL default to `token_count` and reject
 `weight_sum`.

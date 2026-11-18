@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 from torch.nn import functional
@@ -59,7 +61,7 @@ def test_real_schema_rejects_unaligned_model():
         )
 
 
-def reference_loss(logits, targets, ids, mask, start):
+def reference_loss(logits, targets, ids, mask, start, gamma):
     draft, teacher = logits[0].softmax(-1), targets[0].detach().softmax(-1)
     rewards = []
     ce_losses = []
@@ -76,6 +78,7 @@ def reference_loss(logits, targets, ids, mask, start):
                 functional.cross_entropy(
                     logits[0, slot : slot + 1], ids[0, slot : slot + 1]
                 )
+                * math.exp(-(slot - block - start) / gamma)
             )
     zero = logits.sum() * 0
     if not rewards:
@@ -118,6 +121,7 @@ def test_real_value_gradient_and_compile(
     )
     tv_fn = resolve_loss_config("tv", implementation)["tv"][0]
     pos = torch.arange(12, device=device).reshape(1, -1) % 4
+    gamma = 2.5
 
     def run(q, p, token_ids, loss_mask):
         return compound_loss(
@@ -130,6 +134,7 @@ def test_real_value_gradient_and_compile(
             block_size=4,
             start_pos=start,
             tv_loss_fn=tv_fn,
+            gamma=gamma,
         )
 
     actual, terms = (torch.compile(run, fullgraph=True) if compiled else run)(
@@ -138,7 +143,7 @@ def test_real_value_gradient_and_compile(
         ids,
         mask,
     )
-    branch, ce = reference_loss(logits, targets, ids, mask, start)
+    branch, ce = reference_loss(logits, targets, ids, mask, start, gamma)
     expected = (1 - ce_weight) * branch + ce_weight * ce
     torch.testing.assert_close(terms["real_branch_loss"], branch)
     torch.testing.assert_close(terms["ce_gt_loss"], ce)
@@ -159,6 +164,7 @@ def test_real_value_gradient_and_compile(
         tv_loss_fn=tv_fn,
         data_token_ids=ids,
         sample_from_anchor=start == 0,
+        gamma=gamma,
     )
     torch.testing.assert_close(metric_loss, expected)
 
@@ -171,10 +177,24 @@ def test_real_model_metrics(kind):
     mask = torch.ones_like(token_ids)
     config = resolve_loss_config('{"REAL": 0.8, "ce_gt": 0.2}', "eager")
     tv_fn = resolve_loss_config("tv", "eager")["tv"][0]
-    kwargs = {"loss_config": config, "tv_loss_fn": tv_fn, "data_token_ids": token_ids}
+    gamma = 2.5
+    kwargs = {
+        "loss_config": config,
+        "tv_loss_fn": tv_fn,
+        "data_token_ids": token_ids,
+        "loss_normalization": "token_count",
+        "gamma": gamma,
+        "per_position_loss_weight": "dpace",
+    }
     start = int(kind == "dflash2")
+    targets_at_slots = targets.argmax(-1)
+    weights = torch.exp(-torch.arange(4 - start) / gamma)
     if kind == "dspark":
-        loss, _ = dspark_metrics(logits, targets, None, mask, 4, **kwargs)
+        confidence = logits[..., 0]
+        loss, _ = dspark_metrics(logits, targets, confidence, mask, 4, **kwargs)
+        auxiliary = functional.binary_cross_entropy_with_logits(
+            confidence, 1.0 - tv_fn(logits, targets), reduction="none"
+        )
     else:
         candidates = torch.arange(2).expand_as(logits)
         loss, _ = dflash2_metrics(
@@ -182,13 +202,16 @@ def test_real_model_metrics(kind):
             targets,
             candidates,
             logits,
-            targets.argmax(-1),
+            targets_at_slots,
             mask.bool(),
             mask,
             4,
             2,
-            selector_loss_alpha=0.0,
             **kwargs,
         )
-    branch, ce = reference_loss(logits, targets, token_ids, mask, start)
-    torch.testing.assert_close(loss, 0.8 * branch + 0.2 * ce)
+        auxiliary = functional.cross_entropy(
+            logits.transpose(1, 2), targets_at_slots, reduction="none"
+        )
+    branch, ce = reference_loss(logits, targets, token_ids, mask, start, gamma)
+    auxiliary = (auxiliary[:, start:] * weights).sum() / mask.sum()
+    torch.testing.assert_close(loss, 0.8 * branch + 0.2 * ce + auxiliary)
