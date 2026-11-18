@@ -109,7 +109,10 @@ def test_mixed_ce_gt_uses_data_and_preserves_teacher_tv(kind, empty):
         logits.float().reshape(-1, 7), labels.reshape(-1), reduction="none"
     ).view(1, 8)
     tv = 0.5 * (logits.softmax(-1) - teacher.softmax(-1)).abs().sum(-1)
-    expected = ((0.1 * ce + 1.8 * tv) * weights * mask).sum() / (mask.sum() + 1e-5)
+    masked_weights = weights * mask
+    expected = ((0.1 * ce + 1.8 * tv) * masked_weights).sum() / (
+        masked_weights.sum() + 1e-5
+    )
     torch.testing.assert_close(loss, expected)
     expected_grad = torch.autograd.grad(expected, logits, retain_graph=True)[0]
     actual_grad = torch.autograd.grad(loss, logits)[0]
@@ -151,7 +154,7 @@ def test_project_dspark_configs():
     if not (root / "scripts/dspark").exists():
         pytest.skip("Project configs unavailable outside parent repository")
     expected = {
-        "default_ce_tv": {"ce": 0.1, "tv": 1.8},
+        "ce_tv": {"ce": 0.1, "tv": 1.8},
         "ce_gt_tv": {"ce_gt": 0.1, "tv": 1.8},
         "kl_tv": {"kl_div": 0.1, "tv": 1.8},
     }

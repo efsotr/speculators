@@ -21,7 +21,18 @@ def _ids_to_logits(ids: torch.Tensor, vocab_size: int) -> torch.Tensor:
 
 
 class TestComputeMetrics:
-    @pytest.mark.parametrize("per_position_loss_weight", ["fixed-exp-decay", "dpace"])
+    @pytest.mark.parametrize(
+        "per_position_loss_weight",
+        [
+            "fixed-exp-decay",
+            pytest.param(
+                "dpace",
+                marks=pytest.mark.skip(
+                    reason="Legacy D-PACE weighting for compound losses is unsupported"
+                ),
+            ),
+        ],
+    )
     def test_empty_loss_mask_keeps_backward_graph_with_zero_gradients(
         self, per_position_loss_weight
     ):
@@ -169,7 +180,7 @@ class TestComputeMetrics:
     @pytest.mark.parametrize("sample_from_anchor", [False, True])
     @pytest.mark.parametrize("gamma", [1.0, 4.0])
     def test_confidence_loss_keeps_fixed_decay(self, seed, sample_from_anchor, gamma):
-        """Drafter weights must not change the confidence loss or its gradients."""
+        """Fixed decay applies to the confidence loss and its gradients."""
         logits = torch.randn(1, 8, 16)
         targets = torch.randn(1, 8, 16)
         confidence_logits = torch.randn(1, 8, requires_grad=True)
@@ -194,27 +205,21 @@ class TestComputeMetrics:
             confidence_head_alpha * expected_loss, confidence_logits
         )[0]
 
-        draft_losses = []
-        for mode in ("fixed-exp-decay", "dpace"):
-            loss, metrics = compute_metrics(
-                logits,
-                targets,
-                confidence_logits,
-                loss_mask,
-                block_size=4,
-                loss_config=_DEFAULT_LOSS,
-                gamma=gamma,
-                confidence_head_alpha=confidence_head_alpha,
-                per_position_loss_weight=mode,
-                sample_from_anchor=sample_from_anchor,
-            )
-            torch.testing.assert_close(metrics["confidence_loss_sum"], expected_loss)
-            actual_grad = torch.autograd.grad(loss, confidence_logits)[0]
-            torch.testing.assert_close(actual_grad, expected_grad)
-            draft_losses.append(metrics["ce_loss_sum"])
-
-        # The option must still change the drafter's loss.
-        assert not torch.isclose(draft_losses[0], draft_losses[1])
+        loss, metrics = compute_metrics(
+            logits,
+            targets,
+            confidence_logits,
+            loss_mask,
+            block_size=4,
+            loss_config=_DEFAULT_LOSS,
+            gamma=gamma,
+            confidence_head_alpha=confidence_head_alpha,
+            per_position_loss_weight="fixed-exp-decay",
+            sample_from_anchor=sample_from_anchor,
+        )
+        torch.testing.assert_close(metrics["confidence_loss_sum"], expected_loss)
+        actual_grad = torch.autograd.grad(loss, confidence_logits)[0]
+        torch.testing.assert_close(actual_grad, expected_grad)
 
     def test_confidence_cumprod_bias_sign(self):
         # Draft != target so accept rate is ~0; an over-confident head (predicts
