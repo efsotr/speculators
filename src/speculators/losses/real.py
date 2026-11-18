@@ -1,0 +1,54 @@
+"""Target-path objectives from Tian et al., arXiv:2611.14399."""
+
+import torch
+
+TRAJECTORY_LOSSES = {"REAL"}
+
+
+def observed_log_probability(logits, ids):
+    return logits.gather(-1, ids.unsqueeze(-1)).squeeze(-1).float() - (
+        logits.float().logsumexp(-1)
+    )
+
+
+def trajectory_loss(
+    logits,
+    targets,
+    token_ids,
+    loss_mask,
+    *,
+    block_size,
+    start_pos,
+    tv_loss_fn,
+    ce_weight,
+):
+    """Use fixed window normalization and uniform means over nonempty blocks."""
+    if token_ids is None or token_ids.shape != logits.shape[:-1]:
+        raise ValueError("Trajectory losses require aligned data_token_ids")
+    if logits.shape != targets.shape:
+        raise ValueError("Trajectory losses require a shared target/draft vocabulary")
+    window = block_size - start_pos
+    if not 0 <= start_pos < block_size:
+        raise ValueError("Trajectory losses require at least one prediction slot")
+
+    valid = loss_mask.reshape(-1, block_size)[:, start_pos:].bool().cumprod(-1).bool()
+    ids = token_ids.reshape(-1, block_size)[:, start_pos:]
+    ids = torch.where(valid, ids, 0)
+    vocab = logits.shape[-1]
+    q = logits.reshape(-1, block_size, vocab)[:, start_pos:]
+    targets = targets.detach()
+    p = targets.reshape(-1, block_size, vocab)[:, start_pos:]
+    log_q = observed_log_probability(q, ids)
+    log_ratio = log_q - observed_log_probability(p, ids)
+    log_b = torch.where(valid, log_ratio.clamp(max=0.0), 0.0)
+    inclusive = log_b.cumsum(-1)
+    denominator = valid.any(-1).sum().clamp_min(1) * window
+    exclusive = torch.cat((torch.zeros_like(inclusive[:, :1]), inclusive[:, :-1]), -1)
+    tv = tv_loss_fn(logits, targets).reshape(-1, block_size)[:, start_pos:]
+    branch = torch.where(valid, exclusive.exp() * (1.0 - tv), 0.0)
+    objective = valid.any().float() - branch.sum() / denominator
+    ce = torch.where(valid, -log_q, 0.0).sum() / valid.sum().clamp_min(1)
+    return (1.0 - ce_weight) * objective + ce_weight * ce, {
+        "real_branch_loss": objective.detach(),
+        "ce_gt_loss": ce.detach(),
+    }

@@ -5,6 +5,7 @@ import torch
 from transformers import PretrainedConfig
 
 from speculators.losses import LossConfig, kl_div_loss, resolve_loss_config, tv_loss
+from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.model import SpeculatorModel
 from speculators.models.dflash.config import DFlashSpeculatorConfig
 from speculators.models.dflash.core import DFlashDraftModel
@@ -209,6 +210,12 @@ class DFlash2DraftModel(DFlashDraftModel):
                 )
 
         dpa_dev_weights = {}
+        trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config or {}))
+        uses_dataset_loss = trajectory or "ce_gt" in (loss_config or {})
+        if trajectory:
+            aligned_loss_mask = self._trajectory_document_mask(
+                aligned_loss_mask, document_ids, block_indices
+            )
         loss, metrics = compute_metrics(
             unary_logits=unary_logits,
             targets=targets,
@@ -239,11 +246,11 @@ class DFlash2DraftModel(DFlashDraftModel):
                 self._aligned_data_token_ids(
                     input_ids,
                     block_indices,
-                    require_full_vocab="ce_gt" in (loss_config or {}),
+                    require_full_vocab=uses_dataset_loss,
                 )
                 if (
                     dpace_token_source == "data"  # noqa: S105
-                    or "ce_gt" in (loss_config or {})
+                    or uses_dataset_loss
                     or (
                         per_position_loss_weight
                         in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}

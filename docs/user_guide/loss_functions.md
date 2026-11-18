@@ -176,3 +176,26 @@ support. No division by prefix products is used.
 DPA-dev2 ratio signals use `exp(min(log_q - log_p, 0))` for p_draft
 and `exp(min(log_p - log_q, 0))` for q_draft, computing log probabilities
 in fp32 before exponentiation to avoid probability-ratio underflow.
+
+### REAL with dataset-token CE
+
+For DFlash, DFlash2 and DSpark with the verifier vocabulary, set:
+
+```yaml
+loss:
+  loss_fn: '{"REAL": 0.9, "ce_gt": 0.1}'
+```
+
+The two coefficients must be in [0, 1] and sum to 1.
+`ce_gt` is the CE mixing coefficient lambda, and `REAL` is its complement.
+The shorthand `REAL` uses the weights in the example.
+The trainer's confidence and selector losses retain their own coefficients.
+DFlash2's DPA-dev and DPA-dev2 selector modes require a tokenwise unary loss.
+
+At each prediction slot, REAL multiplies the draft/target distribution overlap
+by the product of earlier dataset-token acceptance ratios
+`min(1, q(token) / p(token))`, where q is the draft and p is the teacher.
+The loss is one minus the sum of these contributions divided by the full
+prediction window, then averaged over nonempty blocks. The first masked slot
+or document boundary ends a trajectory. The CE component averages over those
+same valid prediction tokens. Both components are zero for an empty batch.

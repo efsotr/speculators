@@ -16,6 +16,7 @@ from speculators.losses import (
     tv_loss,
 )
 from speculators.losses.dpa_dev import prepare_dpa_dev
+from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.models.metrics import (
     compute_accepted_length_counts,
     compute_accuracy_multi_step,
@@ -69,8 +70,11 @@ def compute_metrics(
     pos_idx = torch.arange(seq_len, device=logits.device) % block_size
     pos_idx = pos_idx.unsqueeze(0)  # shape: [1, T]
 
+    trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config))
     elementwise_losses = None
-    if per_position_loss_weight in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}:
+    if trajectory:
+        decay_fn = None
+    elif per_position_loss_weight in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}:
         elementwise_losses, weights, _accept_rate = prepare_dpa_dev(
             logits,
             targets,
@@ -128,6 +132,9 @@ def compute_metrics(
         decay_fn=decay_fn,
         loss_normalization=loss_normalization,
         elementwise_losses=elementwise_losses,
+        block_size=block_size,
+        start_pos=0 if sample_from_anchor else 1,
+        tv_loss_fn=tv_loss_fn,
         data_token_ids=data_token_ids,
     )
 

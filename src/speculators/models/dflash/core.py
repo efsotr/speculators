@@ -12,6 +12,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 
 from speculators.losses import LossConfig, resolve_loss_config, tv_loss
+from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.model import DraftVocabMixin, SpeculatorModel
 from speculators.models.attention import create_float_mask
 from speculators.models.dflash import DFlashSpeculatorConfig
@@ -652,10 +653,18 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
     ):
         """Align dataset tokens with teacher logits: same slot or next token."""
         if require_full_vocab and self.use_draft_vocab:
-            raise ValueError("ce_gt requires full verifier vocabulary")
+            raise ValueError("Dataset-token losses require full verifier vocabulary")
         if self.config.sample_from_anchor:
             input_ids = torch.roll(input_ids, -1, dims=1)
         return input_ids[:, block_indices]
+
+    def _trajectory_document_mask(self, loss_mask, document_ids, block_indices):
+        anchor_documents = document_ids[:, block_indices[:: self.block_size]]
+        documents = self._aligned_data_token_ids(document_ids, block_indices)
+        same_document = (
+            documents.reshape(-1, self.block_size) == anchor_documents.reshape(-1, 1)
+        )
+        return loss_mask * same_document.reshape_as(loss_mask)
 
     def _backbone_forward(
         self,
@@ -799,6 +808,12 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             max_anchors=max_anchors,
             **kwargs,
         )
+        trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config or {}))
+        uses_dataset_loss = trajectory or "ce_gt" in (loss_config or {})
+        if trajectory:
+            aligned_loss_mask = self._trajectory_document_mask(
+                aligned_loss_mask, document_ids, block_indices
+            )
         loss, metrics = compute_metrics(
             logits,
             targets,
@@ -819,11 +834,11 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                 self._aligned_data_token_ids(
                     input_ids,
                     block_indices,
-                    require_full_vocab="ce_gt" in (loss_config or {}),
+                    require_full_vocab=uses_dataset_loss,
                 )
                 if (
                     dpace_token_source == "data"  # noqa: S105
-                    or "ce_gt" in (loss_config or {})
+                    or uses_dataset_loss
                     or (
                         per_position_loss_weight
                         in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}

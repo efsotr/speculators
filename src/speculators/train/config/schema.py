@@ -30,6 +30,7 @@ from speculators.data_generation.vllm_client import (
     DEFAULT_REQUEST_TIMEOUT,
 )
 from speculators.losses import resolve_loss_config
+from speculators.losses.real import TRAJECTORY_LOSSES
 
 # A bool that must render as an argparse ``--x/--no-x`` (``BooleanOptionalAction``)
 # even though it defaults to False. Bools defaulting to True or None get that form
@@ -438,8 +439,9 @@ class LossArgs(_Group):
         default=None,
         description="Loss function specification. A name "
         "(kl_div, kl_div2, rkl, jsd, ce, ce_gt, tv, "
-        'nla, lk_hybrid) or a JSON dict for a weighted combination, e.g. \'{"ce": 0.1, '
-        '"tv": 0.9}\'. (default: "ce" for dflash, \'{"ce": 0.1, "tv": 0.9}\' for '
+        "nla, lk_hybrid, REAL) or a JSON dict for a weighted combination, "
+        'e.g. \'{"ce": 0.1, "tv": 0.9}\'. REAL pairs with ce_gt using weights that sum '
+        'to 1. (default: "ce" for dflash, \'{"ce": 0.1, "tv": 0.9}\' for '
         'xpress, "kl_div" otherwise).',
     )
     ttt_steps: int = Field(
@@ -1091,6 +1093,19 @@ class TrainConfig(BaseSettings):
     @model_validator(mode="after")
     def _validate_dpace(self) -> "TrainConfig":
         """Validate the objectives and smoothing supported by each D-PACE mode."""
+        losses = resolve_loss_config(self.loss.loss_fn)
+        if TRAJECTORY_LOSSES.intersection(losses):
+            if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
+                raise ValueError("Trajectory losses require dflash, dflash2 or dspark")
+            if (
+                self.speculator_type == "dflash2"
+                and self.dflash.per_position_loss_weight
+                in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}
+            ):
+                raise ValueError(
+                    "DFlash2 DPA-dev selector requires a tokenwise unary loss"
+                )
+            return self
         if self.dflash.per_position_loss_weight in {"dpace", "dpace_dev"}:
             if (
                 self.dflash.per_position_loss_weight == "dpace"
@@ -1108,9 +1123,7 @@ class TrainConfig(BaseSettings):
                 raise ValueError(
                     f"--dpace-alpha must be in (0, 1], got {self.dflash.dpace_alpha}"
                 )
-        if "ce_gt" in resolve_loss_config(
-            self.loss.loss_fn
-        ) and self.speculator_type not in {"dflash", "dflash2", "dspark"}:
+        if "ce_gt" in losses and self.speculator_type not in {"dflash", "dflash2", "dspark"}:
             raise ValueError("ce_gt requires dflash, dflash2 or dspark")
         return self
 

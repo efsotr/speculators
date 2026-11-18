@@ -7,6 +7,7 @@ from functools import partial
 import torch
 
 from speculators.losses import eager
+from speculators.losses.real import TRAJECTORY_LOSSES, trajectory_loss
 
 _LOSS_REDUCTION_EPS = 1e-5
 
@@ -245,6 +246,7 @@ _FUSED_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "jsd": js_div_loss,
     "ce": ce_loss,
     "ce_gt": ce_gt_loss,
+    "REAL": trajectory_loss,
     "tv": tv_loss,
     "nla": neg_log_acceptance_loss,
     "lk_hybrid": lk_hybrid_loss,
@@ -258,6 +260,7 @@ _EAGER_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "jsd": eager.js_div_loss,
     "ce": eager.ce_loss,
     "ce_gt": eager.ce_gt_loss,
+    "REAL": trajectory_loss,
     "tv": eager.tv_loss,
     "nla": eager.neg_log_acceptance_loss,
     "lk_hybrid": eager.lk_hybrid_loss,
@@ -267,7 +270,9 @@ _EAGER_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
 _LOSS_FN_MAPS = {"fused": _FUSED_LOSS_FN_MAP, "eager": _EAGER_LOSS_FN_MAP}
 
 
-def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
+def resolve_loss_config(  # noqa: C901
+    spec: str, implementation: str = "fused"
+) -> LossConfig:
     """Parse a loss spec into ``{name: (loss_fn, weight)}``.
 
     Accepts either a plain loss name (``"kl_div"``) or a JSON dict mapping
@@ -283,6 +288,8 @@ def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
 
     if spec == "ce_tmx":
         spec = "ce"
+    if spec in {"REAL", "real"}:
+        return {"REAL": (trajectory_loss, 0.9), "ce_gt": (loss_fn_map["ce_gt"], 0.1)}
     if spec in loss_fn_map:
         return {spec: (loss_fn_map[spec], 1.0)}
 
@@ -303,7 +310,7 @@ def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
 
     config: LossConfig = {}
     for raw_name, weight in parsed.items():
-        name = "ce" if raw_name == "ce_tmx" else raw_name
+        name = {"ce_tmx": "ce", "real": "REAL"}.get(raw_name, raw_name)
         if name not in loss_fn_map:
             raise ValueError(
                 f"Unknown loss function '{name}' in loss config. "
@@ -317,10 +324,27 @@ def resolve_loss_config(spec: str, implementation: str = "fused") -> LossConfig:
         previous_weight = config[name][1] if name in config else 0.0
         config[name] = (loss_fn_map[name], previous_weight + float(weight))
 
+    if "REAL" in config:
+        _validate_real_weights(config, parsed)
+
     return config
 
 
-def compound_loss(  # noqa: PLR0917
+def _validate_real_weights(config: LossConfig, parsed: dict) -> None:
+    if config.keys() != {"REAL", "ce_gt"}:
+        raise ValueError("REAL requires a loss config with exactly REAL and ce_gt")
+    real_weight = config["REAL"][1]
+    ce_weight = config["ce_gt"][1]
+    if any(isinstance(value, bool) for value in parsed.values()) or not (
+        0.0 <= real_weight <= 1.0
+        and 0.0 <= ce_weight <= 1.0
+        and real_weight + ce_weight == 1.0
+    ):
+        raise ValueError("REAL and ce_gt weights must be in [0, 1] and sum to 1")
+
+
+
+def compound_loss(  # noqa: C901, PLR0917
     logits: torch.Tensor,
     targets: torch.Tensor,
     loss_mask: torch.Tensor,
@@ -331,6 +355,9 @@ def compound_loss(  # noqa: PLR0917
     data_token_ids: torch.Tensor | None = None,
     elementwise_losses: dict[str, torch.Tensor] | None = None,
     loss_normalization: str = "weight_sum",
+    block_size: int | None = None,
+    start_pos: int = 0,
+    tv_loss_fn=tv_loss,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute a weighted sum of loss terms.
 
@@ -342,6 +369,20 @@ def compound_loss(  # noqa: PLR0917
     keyed as ``"{name}_loss"``.  When the config contains a single term the
     dict is empty (the overall loss already captures it).
     """
+    if TRAJECTORY_LOSSES.intersection(loss_config):
+        if block_size is None:
+            raise ValueError("Trajectory losses require a block size")
+        return trajectory_loss(
+            logits,
+            targets,
+            data_token_ids,
+            loss_mask,
+            block_size=block_size,
+            start_pos=start_pos,
+            tv_loss_fn=tv_loss_fn,
+            ce_weight=loss_config["ce_gt"][1],
+        )
+
     total = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
     term_losses: dict[str, torch.Tensor] = {}
     multi = len(loss_config) > 1
