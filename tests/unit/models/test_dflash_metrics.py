@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from speculators.losses import dflash_loss_decay, loss_function, resolve_loss_config
-from speculators.losses.eager import ce_loss
+from speculators.losses.eager import ce_loss, tv_loss
 from speculators.models.dflash.metrics import compute_metrics as _compute_metrics
 from speculators.models.metrics import compute_accuracy_multi_step
 
@@ -395,3 +395,41 @@ class TestExpectedAcceptedLength:
         )
         assert metrics["eal_total"].item() == pytest.approx(1.0)
         assert metrics["eal_sum"].item() == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize("sample_from_anchor", [False, True])
+def test_real_metrics_pool_position_scores_over_blocks(sample_from_anchor):
+    start_pos = 0 if sample_from_anchor else 1
+    block_size = start_pos + 3
+    # Overlap is 0.6 at every slot. The first block has prefix ratios
+    # 0.5 and 1.0; the second stops at a gap; the third is fully masked.
+    q = torch.tensor([0.4, 0.6]).log().expand(1, 3 * block_size, 2)
+    p = torch.tensor([0.8, 0.2]).log().expand_as(q)
+    ids = torch.tensor([[0, 1, 0], [1, 99, 99], [99, 99, 99]])
+    mask = torch.tensor([[1, 1, 1], [1, 0, 1], [0, 0, 0]])
+    if not sample_from_anchor:
+        ids = torch.nn.functional.pad(ids, (1, 0), value=99)
+        mask = torch.nn.functional.pad(mask, (1, 0))
+    mask = mask.reshape(1, -1)
+    loss, metrics = compute_metrics(
+        q,
+        p,
+        mask,
+        block_size,
+        sample_from_anchor=sample_from_anchor,
+        data_token_ids=ids.reshape_as(mask),
+        real_loss_mask=mask,
+        tv_loss_fn=tv_loss,
+    )
+    original_loss, original_metrics = compute_metrics(
+        q, p, mask, block_size, sample_from_anchor=sample_from_anchor
+    )
+    torch.testing.assert_close(loss, original_loss)
+    for key, value in original_metrics.items():
+        torch.testing.assert_close(metrics[key], value)
+
+    assert metrics["real_eal_total"].item() == 2
+    assert metrics["real_eal_sum"].item() == pytest.approx(1.8)
+    for pos, expected in enumerate((1.2, 0.3, 0.3), start=start_pos):
+        assert metrics[f"position_{pos}_real_acc_sum"].item() == pytest.approx(expected)
+        assert metrics[f"position_{pos}_real_acc_total"].item() == 2

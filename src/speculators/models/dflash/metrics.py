@@ -20,12 +20,13 @@ from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.models.metrics import (
     compute_accepted_length_counts,
     compute_accuracy_multi_step,
+    compute_real_branch_counts,
 )
 
 _DEFAULT_LOSS_CONFIG: LossConfig = {"kl_div": (kl_div_loss, 1.0)}
 
 
-def compute_metrics(
+def compute_metrics(  # noqa: C901
     logits: torch.Tensor,  # shape: [1, num_anchors*block_size, draft_vocab_size]
     targets: torch.Tensor,  # shape: [1, num_anchors*block_size, draft_vocab_size]
     loss_mask: torch.Tensor,  # shape: [1, num_anchors*block_size]
@@ -43,6 +44,7 @@ def compute_metrics(
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
     tv_loss_fn=tv_loss,
+    real_loss_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """Compute loss and accuracy metrics for draft model predictions.
 
@@ -171,4 +173,23 @@ def compute_metrics(
     )
     metrics["eal_sum"] = eal_sum
     metrics["eal_total"] = eal_total
+
+    if (
+        real_loss_mask is not None
+        and data_token_ids is not None
+        and start_pos < block_size
+    ):
+        with torch.no_grad():
+            accept_rate = 1.0 - tv_loss_fn(logits, targets)
+        metrics.update(
+            compute_real_branch_counts(
+                logits,
+                targets,
+                data_token_ids,
+                real_loss_mask,
+                accept_rate,
+                block_size=block_size,
+                start_pos=start_pos,
+            )
+        )
     return loss, metrics

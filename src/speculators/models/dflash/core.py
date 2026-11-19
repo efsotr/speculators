@@ -810,10 +810,13 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         )
         trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config or {}))
         uses_dataset_loss = trajectory or "ce_gt" in (loss_config or {})
-        if trajectory:
-            aligned_loss_mask = self._trajectory_document_mask(
+        trajectory_mask = None
+        if trajectory or not self.use_draft_vocab:
+            trajectory_mask = self._trajectory_document_mask(
                 aligned_loss_mask, document_ids, block_indices
             )
+        if trajectory:
+            aligned_loss_mask = trajectory_mask
         loss, metrics = compute_metrics(
             logits,
             targets,
@@ -845,8 +848,10 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                         and dpa_dev_signal in {"p_draft", "q_draft", "q", "p"}
                     )
                 )
+                or not self.use_draft_vocab
                 else None
             ),
+            real_loss_mask=None if self.use_draft_vocab else trajectory_mask,
             sample_from_anchor=self.config.sample_from_anchor,
         )
         metrics.update(getattr(self, "_anchor_sampling_metrics", {}))

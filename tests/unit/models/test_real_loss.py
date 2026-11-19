@@ -182,6 +182,7 @@ def test_real_model_metrics(kind):
         "loss_config": config,
         "tv_loss_fn": tv_fn,
         "data_token_ids": token_ids,
+        "real_loss_mask": mask,
         "loss_normalization": "token_count",
         "gamma": gamma,
         "per_position_loss_weight": "dpace",
@@ -191,13 +192,13 @@ def test_real_model_metrics(kind):
     weights = torch.exp(-torch.arange(4 - start) / gamma)
     if kind == "dspark":
         confidence = logits[..., 0]
-        loss, _ = dspark_metrics(logits, targets, confidence, mask, 4, **kwargs)
+        loss, metrics = dspark_metrics(logits, targets, confidence, mask, 4, **kwargs)
         auxiliary = functional.binary_cross_entropy_with_logits(
             confidence, 1.0 - tv_fn(logits, targets), reduction="none"
         )
     else:
         candidates = torch.arange(2).expand_as(logits)
-        loss, _ = dflash2_metrics(
+        loss, metrics = dflash2_metrics(
             logits,
             targets,
             candidates,
@@ -215,3 +216,5 @@ def test_real_model_metrics(kind):
     branch, ce = reference_loss(logits, targets, token_ids, mask, start, gamma)
     auxiliary = (auxiliary[:, start:] * weights).sum() / mask.sum()
     torch.testing.assert_close(loss, 0.8 * branch + 0.2 * ce + auxiliary)
+    real_eal = metrics["real_eal_sum"] / metrics["real_eal_total"]
+    torch.testing.assert_close(real_eal, (1.0 - branch) * (4 - start))

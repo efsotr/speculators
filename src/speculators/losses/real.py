@@ -11,6 +11,27 @@ def observed_log_probability(logits, ids):
     )
 
 
+def trajectory_token_logs(
+    logits, targets, token_ids, loss_mask, *, block_size, start_pos
+):
+    """Return prefix validity and observed-token log probabilities by block."""
+    valid = loss_mask.reshape(-1, block_size)[:, start_pos:].bool().cumprod(-1).bool()
+    ids = token_ids.reshape(-1, block_size)[:, start_pos:]
+    ids = torch.where(valid, ids, 0)
+    vocab = logits.shape[-1]
+    q = logits.reshape(-1, block_size, vocab)[:, start_pos:]
+    p = targets.reshape(-1, block_size, vocab)[:, start_pos:]
+    log_q = observed_log_probability(q, ids)
+    log_ratio = log_q - observed_log_probability(p, ids)
+    return valid, log_q, log_ratio
+
+
+def real_branch_scores(inclusive, overlap, valid):
+    """Multiply exclusive prefix survival by the current slot overlap."""
+    exclusive = torch.cat((torch.zeros_like(inclusive[:, :1]), inclusive[:, :-1]), -1)
+    return torch.where(valid, exclusive.exp() * overlap, 0.0)
+
+
 def trajectory_loss(
     logits,
     targets,
@@ -32,20 +53,19 @@ def trajectory_loss(
     if not 0 <= start_pos < block_size:
         raise ValueError("Trajectory losses require at least one prediction slot")
 
-    valid = loss_mask.reshape(-1, block_size)[:, start_pos:].bool().cumprod(-1).bool()
-    ids = token_ids.reshape(-1, block_size)[:, start_pos:]
-    ids = torch.where(valid, ids, 0)
-    vocab = logits.shape[-1]
-    q = logits.reshape(-1, block_size, vocab)[:, start_pos:]
     targets = targets.detach()
-    p = targets.reshape(-1, block_size, vocab)[:, start_pos:]
-    log_q = observed_log_probability(q, ids)
-    log_ratio = log_q - observed_log_probability(p, ids)
+    valid, log_q, log_ratio = trajectory_token_logs(
+        logits,
+        targets,
+        token_ids,
+        loss_mask,
+        block_size=block_size,
+        start_pos=start_pos,
+    )
     log_b = torch.where(valid, log_ratio.clamp(max=0.0), 0.0)
     inclusive = log_b.cumsum(-1)
-    exclusive = torch.cat((torch.zeros_like(inclusive[:, :1]), inclusive[:, :-1]), -1)
-    tv = tv_loss_fn(logits, targets).reshape(-1, block_size)[:, start_pos:]
-    branch = torch.where(valid, exclusive.exp() * (1.0 - tv), 0.0)
+    overlap = 1.0 - tv_loss_fn(logits, targets).reshape(-1, block_size)[:, start_pos:]
+    branch = real_branch_scores(inclusive, overlap, valid)
     denominator = valid.sum().clamp_min(1)
     objective = torch.where(valid, 1.0 - branch, 0.0).sum() / denominator
     ce = torch.where(valid, -log_q, 0.0)

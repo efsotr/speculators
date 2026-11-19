@@ -2,6 +2,44 @@
 
 import torch
 
+from speculators.losses.real import real_branch_scores, trajectory_token_logs
+
+
+@torch.no_grad()
+def compute_real_branch_counts(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    token_ids: torch.Tensor,
+    loss_mask: torch.Tensor,
+    overlap: torch.Tensor,
+    *,
+    block_size: int,
+    start_pos: int,
+) -> dict[str, torch.Tensor]:
+    """Count REAL branch position scores over the same blocks as REAL EAL."""
+    if start_pos >= block_size:
+        return {}
+
+    valid, _, log_ratio = trajectory_token_logs(
+        logits,
+        targets,
+        token_ids,
+        loss_mask,
+        block_size=block_size,
+        start_pos=start_pos,
+    )
+    inclusive = torch.where(valid, log_ratio.clamp(max=0.0), 0.0).cumsum(-1)
+    scores = real_branch_scores(
+        inclusive, overlap.reshape(-1, block_size)[:, start_pos:], valid
+    )
+    position_sums = scores.sum(dim=0)
+    block_total = valid[:, 0].sum().float()
+    metrics = {"real_eal_sum": position_sums.sum(), "real_eal_total": block_total}
+    for offset, pos in enumerate(range(start_pos, block_size)):
+        metrics[f"position_{pos}_real_acc_sum"] = position_sums[offset]
+        metrics[f"position_{pos}_real_acc_total"] = block_total
+    return metrics
+
 
 @torch.no_grad()
 def compute_accepted_length_counts(

@@ -33,6 +33,7 @@ from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.models.metrics import (
     compute_accepted_length_counts,
     compute_accuracy_multi_step,
+    compute_real_branch_counts,
 )
 
 __all__ = [
@@ -88,6 +89,7 @@ def compute_metrics(  # noqa: C901
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
     shared_weights: dict | None = None,
+    real_loss_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the DSpark loss and a metrics dict (``*_sum``/``*_total`` pairs)."""
 
@@ -276,4 +278,20 @@ def compute_metrics(  # noqa: C901
     metrics["eal_sum"] = eal_sum
     metrics["eal_total"] = eal_total
 
+    if (
+        real_loss_mask is not None
+        and data_token_ids is not None
+        and start_pos < block_size
+    ):
+        metrics.update(
+            compute_real_branch_counts(
+                logits,
+                targets,
+                data_token_ids,
+                real_loss_mask,
+                accept_rate,
+                block_size=block_size,
+                start_pos=start_pos,
+            )
+        )
     return loss, metrics
