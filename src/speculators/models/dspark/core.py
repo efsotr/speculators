@@ -205,7 +205,11 @@ class DSparkDraftModel(DFlashDraftModel):
             )
 
         trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config or {}))
-        uses_dataset_loss = trajectory or "ce_gt" in (loss_config or {})
+        uses_dataset_loss = (
+            trajectory
+            or "ce_gt" in (loss_config or {})
+            or per_position_loss_weight == "vat"
+        )
         loss, metrics = compute_metrics(
             logits,
             targets,

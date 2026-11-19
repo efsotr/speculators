@@ -24,7 +24,7 @@ from speculators.losses import (
     tv_loss,
 )
 from speculators.losses.dpa_dev import prepare_dpa_dev
-from speculators.losses.real import TRAJECTORY_LOSSES
+from speculators.losses.real import TRAJECTORY_LOSSES, observed_log_probability
 from speculators.models.metrics import (
     compute_accuracy_multi_step,
     compute_greedy_prefix_counts,
@@ -61,6 +61,28 @@ def _masked_decayed_mean(
         elementwise_loss=elementwise,
         loss_normalization=loss_normalization,
     )
+
+
+@torch.no_grad()
+def _vat_weights(logits, targets, data_token_ids, loss_mask, *, block_size, gamma):
+    """Sample acceptance on aligned data tokens and decay after the first rejection."""
+    if data_token_ids is None or data_token_ids.shape != logits.shape[:-1]:
+        raise ValueError("VAT requires aligned data_token_ids")
+    valid = loss_mask.bool()
+    ids = torch.where(valid, data_token_ids, 0)
+    log_q = observed_log_probability(logits, ids)
+    log_p = observed_log_probability(targets, ids)
+    acceptance = (log_q - log_p).clamp(max=0.0).exp()
+    rejected = (valid & (torch.rand_like(acceptance) >= acceptance)).reshape(
+        -1, block_size
+    )
+    positions = torch.arange(block_size, device=logits.device)
+    first_rejection = torch.where(rejected, positions, block_size).amin(
+        dim=-1, keepdim=True
+    )
+    distance = (positions - first_rejection).clamp_min(0)
+    decay = dflash_loss_decay(distance, gamma=gamma, sample_from_anchor=True)
+    return decay.reshape_as(loss_mask) * valid
 
 
 def compute_metrics(  # noqa: C901
@@ -118,6 +140,15 @@ def compute_metrics(  # noqa: C901
 
         if shared_weights is not None:
             shared_weights["weights"] = weights
+    elif per_position_loss_weight == "vat":
+        weights = _vat_weights(
+            logits, targets, data_token_ids, loss_mask,
+            block_size=block_size, gamma=gamma,
+        )
+
+        def decay_fn(*_args, **_kwargs):
+            return weights
+
     elif per_position_loss_weight == "dpace_dev":
         if dpace_token_source == "data" and data_token_ids is None:  # noqa: S105
             raise ValueError("dpace_token_source=data requires aligned data_token_ids")
@@ -186,7 +217,7 @@ def compute_metrics(  # noqa: C901
         bce = binary_cross_entropy_with_logits(
             confidence_logits, c_star, reduction="none"
         )  # [1, T]
-        # Legacy D-PACE keeps fixed confidence decay; DPA-dev shares its weights.
+        # Legacy D-PACE keeps fixed confidence decay; DPA-dev and VAT share weights.
         confidence_decay_fn = partial(
             dflash_loss_decay, gamma=gamma, sample_from_anchor=sample_from_anchor
         )
@@ -198,7 +229,7 @@ def compute_metrics(  # noqa: C901
                 decay_fn
                 if "REAL" not in loss_config
                 and per_position_loss_weight
-                in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}
+                in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2", "vat"}
                 else confidence_decay_fn
             ),
             loss_normalization=loss_normalization,

@@ -683,6 +683,7 @@ class DFlashArgs(_Group):
     per_position_loss_weight: (
         Literal[
             "fixed-exp-decay",
+            "vat",
             "dpace",
             "dpace_dev",
             "dpa_dev",
@@ -693,8 +694,8 @@ class DFlashArgs(_Group):
         | None
     ) = Field(
         default=None,
-        description="Per-position loss weighting: fixed-exp-decay, dpace, or "
-        "dpace_dev (DFlash/DFlash2 with CE or KL), or dpa-dev "
+        description="Per-position loss weighting: fixed-exp-decay, vat (DSpark), "
+        "dpace, dpace_dev (DFlash/DFlash2 with CE or KL), or dpa-dev "
         "(shared detached weights for DFlash/DFlash2/DSpark). "
         "(default: dpace for dflash, fixed-exp-decay otherwise).",
     )
@@ -1074,6 +1075,15 @@ class TrainConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_vat(self) -> "TrainConfig":
+        if self.dflash.per_position_loss_weight == "vat":
+            if self.speculator_type != "dspark":
+                raise ValueError("VAT requires DSpark")
+            if not self.dflash.dflash_decay_gamma > 0:
+                raise ValueError("VAT requires positive dflash_decay_gamma")
+        return self
+
+    @model_validator(mode="after")
     def _validate_dpa_dev(self) -> "TrainConfig":
         if self.dflash.per_position_loss_weight in {"dpa_dev2", "dpa-dev2"}:
             if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
@@ -1108,6 +1118,8 @@ class TrainConfig(BaseSettings):
         """Validate the objectives and smoothing supported by each D-PACE mode."""
         losses = resolve_loss_config(self.loss.loss_fn)
         if TRAJECTORY_LOSSES.intersection(losses):
+            if self.dflash.per_position_loss_weight == "vat":
+                raise ValueError("VAT requires a tokenwise loss")
             if "REAL" in losses:
                 if "loss_normalization" not in self.loss.model_fields_set:
                     self.loss.loss_normalization = "token_count"
