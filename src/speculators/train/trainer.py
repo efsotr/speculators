@@ -197,6 +197,7 @@ class TrainerConfig(NamedTuple):
     pad_target_hidden_states: bool = False
     target_seq_len: int = 8192
     max_try_steps: int | None = None
+    validation_interval_steps: int | None = None
 
 
 def _resolve_scheduler_steps(
@@ -577,6 +578,7 @@ class Trainer:
         skip_steps, replay_steps = self._prepare_resume_skip(epoch)
         max_steps = self.config.max_steps
         max_try_steps = self.config.max_try_steps
+        validation_interval = self.config.validation_interval_steps
 
         train_loader = self.train_loader
         if self.rank == 0:
@@ -714,6 +716,18 @@ class Trainer:
             if step_callback is not None:
                 step_callback()
 
+            if (
+                validation_interval is not None
+                and self.val_loader is not None
+                and self.global_step % validation_interval == 0
+            ):
+                val_metrics = self._run_validation(epoch)
+                if self.config.save_best:
+                    self.maybe_update_best(epoch, val_metrics)
+                self.model.train()
+                self._check_shutdown_boundary()
+                t_before_fetch = time.perf_counter()
+
             if max_try_steps is not None and self.global_step >= max_try_steps:
                 self.maybe_save_checkpoint(
                     epoch,
@@ -740,6 +754,16 @@ class Trainer:
             return
         if batch_index > 0 and batch_index % _VAL_SYNC_INTERVAL == 0:
             dist.barrier()
+
+    def _run_validation(self, epoch: int) -> dict[str, float] | None:
+        assert self.val_loader is not None
+        root_logger.info(f"Validation epoch {epoch + 1} at step {self.global_step} started")
+        validation_started = time.perf_counter()
+        val_metrics = self.val_epoch(epoch)
+        _timing_event("validation", epoch=epoch, steps=len(self.val_loader),
+                      seconds=time.perf_counter() - validation_started)
+        root_logger.info(f"Validation epoch {epoch + 1} at step {self.global_step} completed")
+        return val_metrics
 
     @torch.no_grad()
     def val_epoch(self, epoch: int) -> dict[str, float] | None:
@@ -923,13 +947,8 @@ class Trainer:
 
             if self.val_loader is None:
                 root_logger.warning("No val loader, skipping validation epoch")
-            else:
-                root_logger.info(f"Validation epoch {epoch + 1}/{n_epochs} started")
-                validation_started = time.perf_counter()
-                val_metrics = self.val_epoch(epoch)
-                _timing_event("validation", epoch=epoch, steps=len(self.val_loader),
-                              seconds=time.perf_counter() - validation_started)
-                root_logger.info(f"Validation epoch {epoch + 1}/{n_epochs} completed")
+            elif self.config.validation_interval_steps is None:
+                val_metrics = self._run_validation(epoch)
 
             if self.is_distributed:
                 dist.barrier()

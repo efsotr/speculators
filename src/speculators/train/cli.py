@@ -774,6 +774,7 @@ def main(cfg: TrainConfig):  # noqa: C901
         gradient_checkpointing=args.gradient_checkpointing,
         max_steps=args.max_steps,
         max_try_steps=args.max_try_steps,
+        validation_interval_steps=args.validation_interval_steps,
         shutdown_mode=args.shutdown_mode,
         ddp_compile_optimizer=args.ddp_compile_optimizer,
         ddp_python_reducer=args.ddp_python_reducer,

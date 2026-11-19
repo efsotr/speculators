@@ -617,6 +617,12 @@ class TrainerArgs(_Group):
         "step while keeping the original learning-rate schedule and data plan.",
     )
 
+    validation_interval_steps: int | None = Field(
+        default=None,
+        ge=1,
+        description="Validate at global step multiples of this interval instead of epoch ends.",
+    )
+
     @field_validator("checkpoint_freq")
     @classmethod
     def _validate_checkpoint_freq(cls, v: float) -> float:
