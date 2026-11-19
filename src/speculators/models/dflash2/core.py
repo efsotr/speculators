@@ -113,6 +113,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         shared = {
             "loss_config": loss_config,
             "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
+            "real_beta": kwargs.get("real_beta", 0.0),
             "tv_loss_fn": tv_loss_fn,
             "gamma": kwargs.get("dflash_decay_gamma", 4.0),
             "max_anchors": kwargs.get("max_anchors", 512),
@@ -161,6 +162,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         loss_config: LossConfig | None = None,
         tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
         gamma: float = 4.0,
+        real_beta: float = 0.0,
         max_anchors: int = 512,
         selector_loss_alpha: float = 1.0,
         hidden_state_mse_alpha: float = 0.0,
@@ -226,6 +228,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             loss_config=loss_config or _DEFAULT_LOSS_CONFIG,
             tv_loss_fn=tv_loss_fn,
             gamma=gamma,
+            real_beta=real_beta,
             selector_loss_alpha=selector_loss_alpha,
             dpa_dev_weights=dpa_dev_weights,
             loss_normalization=loss_normalization,

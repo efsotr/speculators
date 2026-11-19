@@ -36,6 +36,7 @@ def test_real_schema(kind):
             "loss": {"loss_fn": '{"REAL": 0.7, "ce_gt": 0.3}'},
         }
     )
+    assert cfg.loss.real_beta == 0.0
     assert cfg.loss.loss_normalization == "token_count"
     assert resolve_loss_config(cfg.loss.loss_fn)["ce_gt"][1] == 0.3
     assert resolve_loss_config("REAL")["ce_gt"][1] == 0.1
@@ -61,7 +62,7 @@ def test_real_schema_rejects_unaligned_model():
         )
 
 
-def reference_loss(logits, targets, ids, mask, start, gamma):
+def reference_loss(logits, targets, ids, mask, start, gamma, beta=0.0):
     draft, teacher = logits[0].softmax(-1), targets[0].detach().softmax(-1)
     rewards = []
     ce_losses = []
@@ -71,9 +72,10 @@ def reference_loss(logits, targets, ids, mask, start, gamma):
             if not mask[0, slot]:
                 break
             token = ids[0, slot]
-            rewards.append(survival * torch.minimum(draft[slot], teacher[slot]).sum())
-            ratio = draft[slot, token] / teacher[slot, token]
-            survival = survival * ratio.clamp(max=1.0)
+            overlap = torch.minimum(draft[slot], teacher[slot]).sum()
+            ratio = (draft[slot, token] / teacher[slot, token]).clamp(max=1.0)
+            rewards.append(survival * ((1 + beta) * overlap - beta * ratio))
+            survival = survival * ratio
             ce_losses.append(
                 functional.cross_entropy(
                     logits[0, slot : slot + 1], ids[0, slot : slot + 1]
@@ -86,6 +88,7 @@ def reference_loss(logits, targets, ids, mask, start, gamma):
     return (1 - torch.stack(rewards)).mean(), torch.stack(ce_losses).mean()
 
 
+@pytest.mark.parametrize("beta", [0.0, 2.0])
 @pytest.mark.parametrize(
     ("implementation", "start", "ce_weight", "compiled", "empty"),
     [
@@ -98,7 +101,7 @@ def reference_loss(logits, targets, ids, mask, start, gamma):
     ],
 )
 def test_real_value_gradient_and_compile(
-    implementation, start, ce_weight, compiled, empty
+    implementation, start, ce_weight, compiled, empty, beta
 ):
     if implementation == "fused" and not torch.cuda.is_available():
         pytest.skip("fused TV requires CUDA")
@@ -135,6 +138,7 @@ def test_real_value_gradient_and_compile(
             start_pos=start,
             tv_loss_fn=tv_fn,
             gamma=gamma,
+            real_beta=beta,
         )
 
     actual, terms = (torch.compile(run, fullgraph=True) if compiled else run)(
@@ -143,7 +147,7 @@ def test_real_value_gradient_and_compile(
         ids,
         mask,
     )
-    branch, ce = reference_loss(logits, targets, ids, mask, start, gamma)
+    branch, ce = reference_loss(logits, targets, ids, mask, start, gamma, beta)
     expected = (1 - ce_weight) * branch + ce_weight * ce
     torch.testing.assert_close(terms["real_branch_loss"], branch)
     torch.testing.assert_close(terms["ce_gt_loss"], ce)
@@ -165,6 +169,7 @@ def test_real_value_gradient_and_compile(
         data_token_ids=ids,
         sample_from_anchor=start == 0,
         gamma=gamma,
+        real_beta=beta,
     )
     torch.testing.assert_close(metric_loss, expected)
 
@@ -185,6 +190,7 @@ def test_real_model_metrics(kind):
         "compute_prob_metrics": True,
         "loss_normalization": "token_count",
         "gamma": gamma,
+        "real_beta": 2.0,
         "per_position_loss_weight": "dpace",
     }
     start = int(kind == "dflash2")
@@ -215,9 +221,10 @@ def test_real_model_metrics(kind):
         auxiliary = functional.cross_entropy(
             logits.transpose(1, 2), targets_at_slots, reduction="none"
         )
-    branch, ce = reference_loss(logits, targets, token_ids, mask, start, gamma)
+    branch, ce = reference_loss(logits, targets, token_ids, mask, start, gamma, 2.0)
     auxiliary = (auxiliary[:, start:] * weights).sum() / mask.sum()
     torch.testing.assert_close(loss, 0.8 * branch + 0.2 * ce + auxiliary)
     real_eal = metrics["prob_eal_sum"] / metrics["prob_eal_total"]
-    expected_eal = 4.0 if kind == "dflash2" else 1.0 + (1.0 - branch) * 4
+    uncorrected, _ = reference_loss(logits, targets, token_ids, mask, start, gamma)
+    expected_eal = 4.0 if kind == "dflash2" else 1.0 + (1.0 - uncorrected) * 4
     torch.testing.assert_close(real_eal, torch.as_tensor(expected_eal))

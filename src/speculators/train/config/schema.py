@@ -419,6 +419,12 @@ class GenerationArgs(_Group):
 
 
 class LossArgs(_Group):
+    real_beta: float = Field(
+        default=0.0,
+        allow_inf_nan=False,
+        description="REAL correction: use (1 + beta) * overlap - beta * acceptance "
+        "at each slot.",
+    )
     hidden_state_mse_alpha: float = Field(
         default=0.0,
         ge=0.0,
@@ -1119,6 +1125,8 @@ class TrainConfig(BaseSettings):
     def _validate_dpace(self) -> "TrainConfig":
         """Validate the objectives and smoothing supported by each D-PACE mode."""
         losses = resolve_loss_config(self.loss.loss_fn)
+        if self.loss.real_beta != 0.0 and "REAL" not in losses:
+            raise ValueError("real_beta requires REAL in loss_fn")
         if "overlap_prod" in losses:
             if self.speculator_type != "dspark":
                 raise ValueError("overlap_prod requires dspark")

@@ -44,6 +44,7 @@ def trajectory_loss(
     tv_loss_fn,
     raw_path,
     ce_weight,
+    beta=0.0,
     ce_name="ce_gt",
     ce_position_weights=None,
     tv_cache=None,
@@ -84,6 +85,8 @@ def trajectory_loss(
     if tv_cache is not None:
         tv_cache["tv"] = tv.detach()
     overlap = 1.0 - tv.reshape(-1, block_size)[:, start_pos:]
+    if beta != 0.0:
+        overlap = (1.0 + beta) * overlap - beta * log_b.exp()
     branch = real_branch_scores(inclusive, overlap, valid)
     denominator = valid.sum().clamp_min(1)
     objective = torch.where(valid, 1.0 - branch, 0.0).sum() / denominator

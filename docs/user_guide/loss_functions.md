@@ -197,6 +197,11 @@ DFlash2's DPA-dev and DPA-dev2 selector modes require a tokenwise unary loss.
 At each prediction slot, REAL multiplies the draft/target distribution overlap
 by the product of earlier dataset-token acceptance ratios
 `min(1, q(token) / p(token))`, where q is the draft and p is the teacher.
+Set `loss.real_beta` to replace the current slot's overlap `a_i` with
+`(1 + beta) * a_i - beta * r_i`, where `r_i` is that slot's dataset-token
+acceptance ratio. The exclusive prefix still uses the earlier acceptance
+ratios. The default is `0.0`. This coefficient applies to the objective;
+`prob_eal` continues to use the overlap.
 The first masked slot or document boundary ends a trajectory. The REAL
 component averages one minus the contribution at each valid prediction
 slot. The CE component weights those same slots by `exp(-i / gamma)`,

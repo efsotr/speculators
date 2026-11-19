@@ -101,6 +101,7 @@ def compute_metrics(  # noqa: C901
     loss_config: LossConfig,
     tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
     gamma: float = 4.0,
+    real_beta: float = 0.0,
     confidence_head_alpha: float = 1.0,
     loss_normalization: str = "weight_sum",
     per_position_loss_weight: str = "fixed-exp-decay",
@@ -203,6 +204,7 @@ def compute_metrics(  # noqa: C901
         start_pos=0 if sample_from_anchor else 1,
         tv_loss_fn=tv_loss_fn,
         gamma=gamma,
+        real_beta=real_beta,
         data_token_ids=data_token_ids,
         tv_cache=tv_cache,
     )

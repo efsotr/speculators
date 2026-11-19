@@ -110,6 +110,7 @@ class DSparkDraftModel(DFlashDraftModel):
         shared = {
             "loss_config": loss_config,
             "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
+            "real_beta": kwargs.get("real_beta", 0.0),
             "tv_loss_fn": tv_loss_fn,
             "gamma": gamma,
             "max_anchors": max_anchors,
@@ -159,6 +160,7 @@ class DSparkDraftModel(DFlashDraftModel):
         loss_config: LossConfig | None = None,
         tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
         gamma: float = 4.0,
+        real_beta: float = 0.0,
         max_anchors: int = 3072,
         confidence_head_alpha: float = 1.0,
         loss_normalization: str = "weight_sum",
@@ -245,6 +247,7 @@ class DSparkDraftModel(DFlashDraftModel):
             loss_config=loss_config or _DEFAULT_LOSS_CONFIG,
             tv_loss_fn=tv_loss_fn,
             gamma=gamma,
+            real_beta=real_beta,
             confidence_head_alpha=confidence_head_alpha,
             loss_normalization=loss_normalization,
             per_position_loss_weight=per_position_loss_weight,

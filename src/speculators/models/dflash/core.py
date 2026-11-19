@@ -443,6 +443,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         shared = {
             "loss_config": loss_config,
             "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
+            "real_beta": kwargs.get("real_beta", 0.0),
             "gamma": gamma,
             "max_anchors": max_anchors,
             "per_position_loss_weight": per_position_loss_weight,
@@ -784,6 +785,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         position_ids: torch.Tensor | None = None,  # shape: [1, total_seq_len]
         loss_config: LossConfig | None = None,
         gamma: float = 4.0,
+        real_beta: float = 0.0,
         max_anchors: int = 512,
         loss_normalization: str = "weight_sum",
         per_position_loss_weight: str = "fixed-exp-decay",
@@ -813,6 +815,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             aligned_loss_mask,
             self.block_size,
             gamma=gamma,
+            real_beta=real_beta,
             loss_config=loss_config,
             loss_normalization=loss_normalization,
             per_position_loss_weight=per_position_loss_weight,
