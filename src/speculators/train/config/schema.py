@@ -579,7 +579,7 @@ class TrainerArgs(_Group):
     )
     save_path: str = Field(
         default="./output/checkpoints",
-        description="Directory to write checkpoints and the resolved run.yaml.",
+        description="Checkpoint directory. Its parent is the training directory.",
     )
     fsdp_shard: bool = Field(
         default=False,
@@ -1252,7 +1252,7 @@ class TrainConfig(BaseSettings):
 
     def save(self, save_dir: str) -> None:
         """Write the reproducibility artifacts (``run.yaml`` + ``train_command.txt``)
-        next to the checkpoints. Called at rank 0."""
+        to an explicitly selected directory."""
         from speculators.train.config import artifacts  # noqa: PLC0415
 
         artifacts.save(self, save_dir)

@@ -41,7 +41,7 @@ from speculators.train.logger import (
 )
 from speculators.train.torch_logging import setup_torch_logging
 from speculators.train.trainer import Trainer, TrainerConfig
-from speculators.train.utils import resolve_mask_token_id
+from speculators.train.utils import resolve_mask_token_id, save_train_command
 from speculators.train.vocab_mapping import (
     build_vocab_mappings_from_distribution,
     get_target_vocab_size,
@@ -630,11 +630,11 @@ def main(cfg: TrainConfig):  # noqa: C901
             "Installed partial-neox rotary patch for HF/vLLM RoPE alignment "
             "(draft_mrope_full_head_hack=False)"
         )
-    # Write the reproducibility artifacts (run.yaml + train_command.txt) next to
-    # the checkpoints at rank 0 only, so every checkpoint carries the resolved
-    # config that produced it.
+    training_dir = Path(cfg.trainer.save_path).parent
     if get_rank() == 0:
-        cfg.save(args.save_path)
+        save_train_command(
+            str(training_dir), argv=list(cfg.argv), include_patch=False
+        )
 
     hidden_states_dtype = getattr(torch, args.hidden_states_dtype)
 
@@ -785,7 +785,15 @@ def main(cfg: TrainConfig):  # noqa: C901
         pad_target_hidden_states=args.pad_target_hidden_states,
         target_seq_len=args.total_seq_len,
     )
-    trainer = Trainer(draft_model, trainer_config, train_loader, val_loader)
+    run_config = {**cfg.model_dump(mode="json"), "backend": dict(cfg.backend_args)}
+    trainer = Trainer(
+        draft_model,
+        trainer_config,
+        train_loader,
+        val_loader,
+        run_config=run_config,
+        training_dir=training_dir,
+    )
 
     # Run training
     try:

@@ -20,7 +20,7 @@ Fill in the PR template's **Purpose** and **Tests** sections (see [PULL_REQUEST_
 
 Training, eval, and vLLM-launch scripts write reproducibility artifacts so runs can be recreated later.
 
-- **Training** (`src/speculators/train/utils.py`): `save_train_command()` writes `train_command.txt` (timestamp, git SHA, world size, package versions, full argv) and `speculators.patch` (uncommitted diff) into the checkpoint directory.
+- **Training** (`src/speculators/train/cli.py`, `src/speculators/train/trainer.py`): rank 0 writes `train_command.txt` to the parent of `--save-path` and `train_info.json` to each training checkpoint. The parent directory also receives the complete history at completion or graceful shutdown.
 - **Eval** (`scripts/evaluate/evaluate.py`): `save_eval_provenance()` writes `eval_command.txt` (timestamp, git SHA, package versions, full argv) into the output directory.
 - **vLLM launch** (`scripts/launch_vllm.py`): `_save_vllm_provenance()` writes `vllm_command.txt`, `vllm.patch`, and `checkpoint_sha256.txt` (plus `drafter_checkpoint_sha256.txt` in eval mode) — but **only when `--provenance-dir` is passed**. Two subcommands:
   - `launch_vllm.py train MODEL` (default): hidden-states extraction for training data generation.

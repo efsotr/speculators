@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from speculators.train.train_info import TrainInfo
 from speculators.train.trainer import Trainer, TrainerConfig
 
 # ---------------------------------------------------------------------------
@@ -59,10 +60,11 @@ def test_barrier_count_is_deterministic_for_a_given_batch_count(interval):
 # ---------------------------------------------------------------------------
 
 
-def _fake_batch() -> dict[str, torch.Tensor]:
+def _fake_batch() -> dict[str, torch.Tensor | int]:
     return {
         "input_ids": torch.zeros(1, 4, dtype=torch.long),
         "hidden_states": torch.zeros(1, 4, 16),
+        "error_records": 0,
     }
 
 
@@ -87,6 +89,8 @@ def _make_val_trainer(n_batches: int, *, is_distributed: bool) -> "Trainer":
     trainer.rank = 1
     trainer.local_rank = 0
     trainer.device_type = "cpu"
+    trainer.device = torch.device("cpu")
+    trainer.train_info = TrainInfo(trainer.rank, is_distributed, None)
     trainer.global_step = 0
     trainer.config = TrainerConfig(
         lr=1e-3,

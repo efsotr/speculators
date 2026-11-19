@@ -129,6 +129,19 @@ rename requirement for resumption.
 
 - **`--save-path`** (str, default: `"./checkpoints"`) Directory to save model checkpoints.
 
+Rank 0 writes `train_command.txt` to the training directory (the parent of
+`--save-path`). Every training checkpoint contains
+`train_info.json` with the resolved config, dataset split sizes, cumulative throughput
+and packing utilization, every optimizer step, and each completed validation run.
+The training directory also receives the full history when training finishes or saves
+an interrupted checkpoint. Resuming appends to the history from the loaded checkpoint
+when available. Use `--dump-config` to export a reusable YAML config.
+
+The JSON uses zero-based optimizer-step indices in `train_steps` and completed-step
+counts in `validation_runs` and `progress`. Token and document counts cover all ranks.
+Throughput uses active wall time measured on rank 0 and counts non-padding input tokens.
+The optional step `profile` follows `--log-freq`.
+
 - **`--epochs`** (int, default: `20`) Number of training epochs.
 
 - **`--lr`** (float, default: `1e-3`) Learning rate.

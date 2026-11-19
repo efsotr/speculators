@@ -248,6 +248,7 @@ def test_real_train_loop_finishes_one_batch_before_save(original_handlers):
 
     import torch
 
+    from speculators.train.train_info import TrainInfo
     from speculators.train.trainer import Trainer, TrainerConfig
 
     class Model(torch.nn.Module):
@@ -273,9 +274,11 @@ def test_real_train_loop_finishes_one_batch_before_save(original_handlers):
     trainer.optimizers = [torch.optim.SGD(trainer.model.parameters(), lr=0.1)]
     trainer.schedulers = [torch.optim.lr_scheduler.StepLR(trainer.optimizers[0], 1)]
     trainer.local_rank = "cpu"
+    trainer.device = torch.device("cpu")
     trainer.rank = 1  # Disable progress output.
     trainer.device_type = "cpu"
     trainer.is_distributed = False
+    trainer.train_info = TrainInfo(trainer.rank, False, None)
     trainer.global_step = 1  # Disable optional metrics for this batch.
     trainer.train_loader = torch.utils.data.DataLoader([{"error_records": 0}] * 3)
     trainer.checkpointer = _Checkpointer()

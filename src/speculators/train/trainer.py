@@ -24,12 +24,12 @@ from transformers import (
 )
 
 from speculators.model import SpeculatorModel
-from speculators.train.compile_memory import CompileCycleCleanup
 from speculators.train.checkpointer import (
     BaseCheckpointer,
     DistributedCheckpointer,
     SingleGPUCheckpointer,
 )
+from speculators.train.compile_memory import CompileCycleCleanup
 from speculators.train.distributed import (
     apply_fully_sharded,
     get_local_rank,
@@ -40,6 +40,12 @@ from speculators.train.graceful_shutdown import with_graceful_shutdown
 from speculators.train.memory_profile import CudaMemoryProfile
 from speculators.train.optimizers import build_optimizers
 from speculators.train.recovery import BatchRecoveryCoordinator
+from speculators.train.train_info import (
+    BATCH_COUNT_FIELDS,
+    TrainInfo,
+    batch_counts,
+    describe_split,
+)
 from speculators.train.utils import normalize_counted_metrics
 
 root_logger = logging.getLogger("speculators")
@@ -74,8 +80,9 @@ class _StepTimer:
     # fields (fetch_ms, step_ms, queue_ms) also absorb any GPU backlog still
     # draining from that step. Phase-relative fields (fwd/bwd/opt/h2d/clip_ms)
     # are unaffected, as every mark synchronizes.
-    def __init__(self, enabled: bool = False):
+    def __init__(self, enabled: bool = False, *, accelerator: bool = True):
         self.enabled = enabled
+        self.accelerator = accelerator
         self._marks: dict[str, float] = {}
         self._memory: dict[str, dict[str, float]] = {}
 
@@ -86,9 +93,10 @@ class _StepTimer:
 
     def mark(self, name: str) -> None:
         if self.enabled:
-            torch.accelerator.synchronize()
+            if self.accelerator:
+                torch.accelerator.synchronize()
             self._marks[name] = time.perf_counter()
-            if torch.accelerator.is_available():
+            if self.accelerator and torch.accelerator.is_available():
                 # Cached means allocator-reserved memory, including live tensors.
                 # Each peak covers the interval since the previous sample/reset.
                 self._memory[name] = {
@@ -110,7 +118,8 @@ class _StepTimer:
     def now(self) -> float | None:
         if not self.enabled:
             return None
-        torch.accelerator.synchronize()
+        if self.accelerator:
+            torch.accelerator.synchronize()
         return time.perf_counter()
 
     def profile(self, num_tokens: int) -> dict | None:
@@ -144,6 +153,7 @@ _RECOVERY_SYNC_INTERVAL = 50
 
 # Bound rank skew before the validation metrics reduction.
 _VAL_SYNC_INTERVAL = 50
+_TRAIN_INFO_WINDOW = 50
 
 
 def _should_sync_recovery(
@@ -249,6 +259,10 @@ class Trainer:
         config: TrainerConfig,
         train_loader: DataLoader,
         val_loader: DataLoader | None = None,
+        *,
+        run_config: dict | None = None,
+        training_dir: Path | None = None,
+        device: torch.device | None = None,
     ):
         self.model = model
         self.config = config
@@ -258,16 +272,32 @@ class Trainer:
         self.val_loader = val_loader
         self.is_distributed = is_distributed()
         self.resume_from_checkpoint = config.resume_from_checkpoint
-        acc = torch.accelerator.current_accelerator()
-        self.device_type = acc.type if acc is not None else "cuda"
+        if device is None:
+            acc = torch.accelerator.current_accelerator(check_available=True)
+            device = (
+                torch.device(acc.type, self.local_rank) if acc else torch.device("cpu")
+            )
+        self.device = device
+        self.device_type = device.type
         checkpointer_class: type[BaseCheckpointer] = (
             DistributedCheckpointer
             if self.is_distributed and config.fsdp_shard
             else SingleGPUCheckpointer
         )
         self.checkpointer: BaseCheckpointer = checkpointer_class(self.config.save_path)
+        self.training_dir = training_dir or self.checkpointer.path
 
         self.setup_trainer()
+        self.train_info = TrainInfo(
+            self.rank,
+            self.is_distributed,
+            self.checkpointer.prev_path if self.resume_from_checkpoint else None,
+        )
+        self.run_config = run_config or {}
+        self.dataset_info = (
+            {"train": describe_split(train_loader), "valid": describe_split(val_loader)}
+            if self.rank == 0 else {}
+        )
         self.setup_model()
         self.setup_optimizer()
 
@@ -411,7 +441,7 @@ class Trainer:
         )
 
         if not self.is_distributed:
-            self.model.to(self.local_rank)  # type: ignore[arg-type]
+            self.model.to(self.device)
             if load_checkpoint:
                 self.checkpointer.load_model_state_dict(self.model)
             return
@@ -451,7 +481,7 @@ class Trainer:
             dist.barrier()
 
     def _setup_model_ddp(self, load_checkpoint: bool):
-        self.model.to(self.local_rank)  # type: ignore[arg-type]
+        self.model.to(self.device)
 
         if load_checkpoint:
             if dist.get_rank() == 0:
@@ -590,7 +620,7 @@ class Trainer:
             else None
         )
         t_before_fetch = time.perf_counter()
-        timer = _StepTimer()
+        timer = _StepTimer(accelerator=self.device_type != "cpu")
         recovery = BatchRecoveryCoordinator("training")
         remaining_steps = len(self.train_loader)
         wall_step_started = time.perf_counter()
@@ -621,7 +651,7 @@ class Trainer:
                 continue
             timer.mark("pre_h2d")
             gpu_batch = {
-                k: v.to(self.local_rank, non_blocking=True)
+                k: v.to(self.device, non_blocking=True)
                 if isinstance(v, torch.Tensor)
                 else v
                 for k, v in batch.items()
@@ -663,8 +693,9 @@ class Trainer:
             timer.mark("pre_clip")
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
+            counts = batch_counts(batch)
             metrics["error_records_sum"] = torch.tensor(
-                batch["error_records"], dtype=torch.float32, device=loss.device
+                counts[-1], dtype=torch.float32, device=loss.device
             )
             metrics["error_records_total"] = torch.tensor(
                 1.0 if self.rank == 0 else 0,
@@ -683,24 +714,32 @@ class Trainer:
             timer.mark("opt")
             t_before_fetch = timer.now() or time.perf_counter()
 
-            profile = None
-            if timer.enabled:
-                num_tokens = int((gpu_batch["document_ids"] != -1).sum().item())
-                profile = timer.profile(num_tokens)
-                if self.is_distributed:
-                    metrics = _all_reduce_metrics(metrics)
-
-                metrics = {k: v.item() for k, v in metrics.items()}
-                world_size = dist.get_world_size() if self.is_distributed else 1
-                metrics = normalize_counted_metrics(metrics, world_size)
-                lr_info = (
-                    current_lrs
-                    if len(current_lrs) > 1
-                    else next(iter(current_lrs.values()))
-                )
+            profile = timer.profile(counts[0])
+            lr_info = (
+                current_lrs
+                if len(current_lrs) > 1
+                else next(iter(current_lrs.values()))
+            )
+            seconds = time.perf_counter() - wall_step_started
+            self.train_info.add_step(
+                {
+                    "epoch": epoch,
+                    "local_step": local_step,
+                    "global_step": self.global_step,
+                    "lr": lr_info,
+                    "profile": profile,
+                    "seconds": seconds,
+                },
+                metrics,
+                counts,
+            )
+            latest = None
+            if timer.enabled or len(self.train_info.pending) >= _TRAIN_INFO_WINDOW:
+                latest = self.train_info.flush()
+            if timer.enabled and latest is not None:
                 metric_logger.info(
                     {
-                        "train": metrics,
+                        "train": latest,
                         "profile": profile,
                         "epoch": epoch,
                         "lr": lr_info,
@@ -723,7 +762,11 @@ class Trainer:
             ):
                 val_metrics = self._run_validation(epoch)
                 if self.config.save_best:
-                    self.maybe_update_best(epoch, val_metrics)
+                    self.maybe_update_best(
+                        epoch,
+                        val_metrics,
+                        local_step=local_step if local_step < num_steps else 0,
+                    )
                 self.model.train()
                 self._check_shutdown_boundary()
                 t_before_fetch = time.perf_counter()
@@ -748,6 +791,7 @@ class Trainer:
             ):
                 self.maybe_save_checkpoint(epoch, local_step=local_step)
             wall_step_started = time.perf_counter()
+        self.train_info.flush()
 
     def _maybe_val_sync(self, batch_index: int) -> None:
         if not self.is_distributed or _VAL_SYNC_INTERVAL <= 0:
@@ -757,6 +801,7 @@ class Trainer:
 
     def _run_validation(self, epoch: int) -> dict[str, float] | None:
         assert self.val_loader is not None
+        self.train_info.flush()
         root_logger.info(f"Validation epoch {epoch + 1} at step {self.global_step} started")
         validation_started = time.perf_counter()
         val_metrics = self.val_epoch(epoch)
@@ -769,6 +814,7 @@ class Trainer:
     def val_epoch(self, epoch: int) -> dict[str, float] | None:
         if self.val_loader is None:
             return None
+        validation_started = time.perf_counter()
         self.model.eval()
         if hasattr(self.val_loader.batch_sampler, "set_epoch"):
             self.val_loader.batch_sampler.set_epoch(epoch)  # type: ignore[union-attr]
@@ -777,6 +823,7 @@ class Trainer:
             val_loader = tqdm(val_loader, desc=f"Epoch {epoch}")  # type: ignore[assignment]
 
         accumulated: dict[str, torch.Tensor] = {}
+        counts = [0] * len(BATCH_COUNT_FIELDS)
         num_batches = len(val_loader)
         recovery = BatchRecoveryCoordinator("validation")
         memory_profile = CudaMemoryProfile(self.local_rank, "validation", epoch)
@@ -788,7 +835,7 @@ class Trainer:
                 synchronize=_should_sync_recovery(i, num_batches - 1),
             )
             gpu_batch = {
-                k: v.to(self.local_rank, non_blocking=True)
+                k: v.to(self.device, non_blocking=True)
                 if isinstance(v, torch.Tensor)
                 else v
                 for k, v in batch.items()
@@ -819,10 +866,17 @@ class Trainer:
             for k, v in metrics.items():
                 acc = accumulated.get(k)
                 accumulated[k] = v.float() if acc is None else acc + v.float()
+            for index, count in enumerate(batch_counts(batch)):
+                counts[index] += count
             compile_cleanup.collect_if_compiled()
             memory_profile.record(i, batch)
 
         val_metrics: dict[str, float] = {}
+        if self.is_distributed:
+            reduced_counts = torch.tensor(counts, device=self.device)
+            dist.all_reduce(reduced_counts)
+            if self.rank == 0:
+                counts = reduced_counts.tolist()
         if accumulated:
             if self.is_distributed:
                 accumulated = _all_reduce_metrics(accumulated)
@@ -833,11 +887,33 @@ class Trainer:
         val_metrics = normalize_counted_metrics(val_metrics, world_size)
         val_metrics = {f"{k}_epoch": v for k, v in val_metrics.items()}
 
+        self.train_info.add_validation(
+            {
+                "epoch": epoch,
+                "global_step": self.global_step,
+                "batches_per_rank": num_batches,
+                "seconds": time.perf_counter() - validation_started,
+                **dict(zip(BATCH_COUNT_FIELDS, counts, strict=True)),
+            },
+            val_metrics,
+        )
         metric_logger.info(
             {"val": val_metrics, "epoch": epoch}, extra={"step": self.global_step}
         )
 
         return val_metrics
+
+    def _save_train_info(self, epoch: int | str | None = None) -> None:
+        self.train_info.flush()
+        path = (
+            self.training_dir if epoch is None else self.checkpointer.path / str(epoch)
+        )
+        self.train_info.save(
+            path,
+            dataset=self.dataset_info,
+            config=self.run_config,
+            progress={"checkpoint": epoch, "global_step": self.global_step},
+        )
 
     def maybe_save_checkpoint(
         self, epoch: int | str, local_step: int = 0, *, force: bool = False
@@ -854,10 +930,14 @@ class Trainer:
             return
 
         checkpoint_started = time.perf_counter()
+        self.train_info.flush()
         root_logger.info(f"Saving checkpoint to {self.checkpointer.path / str(epoch)}")
         self.checkpointer.save_checkpoint(self.model, self.optimizers, epoch)
         if self.schedulers:
             self.checkpointer.save_scheduler_state_dict(self.schedulers, epoch)
+        self._save_train_info(epoch)
+        if epoch == "interrupted":
+            self._save_train_info()
         if isinstance(epoch, int):
             self._save_training_state(epoch, local_step)
             # Create a human-readable symlink for checkpoint readability.
@@ -875,7 +955,9 @@ class Trainer:
         root_logger.info(f"Checkpoint saved to {self.checkpointer.path / str(epoch)}")
         _timing_event("checkpoint", epoch=epoch, seconds=time.perf_counter() - checkpoint_started)
 
-    def maybe_update_best(self, epoch: int, val_metrics: dict | None):
+    def maybe_update_best(
+        self, epoch: int, val_metrics: dict | None, *, local_step: int = 0
+    ):
         if val_metrics is None or "loss_epoch" not in val_metrics:
             return
         if val_metrics["loss_epoch"] >= self.best_val_loss:
@@ -886,6 +968,8 @@ class Trainer:
             self.checkpointer.save_checkpoint(self.model, self.optimizers, epoch)
             if self.schedulers:
                 self.checkpointer.save_scheduler_state_dict(self.schedulers, epoch)
+            self._save_training_state(epoch, local_step)
+            self._save_train_info(epoch)
         elif self.config.checkpoint_freq >= 1 and not (
             epoch == 0 or (epoch + 1) % int(self.config.checkpoint_freq) == 0
         ):
@@ -938,11 +1022,6 @@ class Trainer:
             if self.is_distributed:
                 dist.barrier()
 
-            self.maybe_save_checkpoint(epoch)
-
-            if self.is_distributed:
-                dist.barrier()
-
             val_metrics = None
 
             if self.val_loader is None:
@@ -954,9 +1033,11 @@ class Trainer:
                 dist.barrier()
 
             self._check_shutdown_boundary()
+            self.maybe_save_checkpoint(epoch)
             self.maybe_update_best(epoch, val_metrics)
 
             if self.is_distributed:
                 dist.barrier()
+        self._save_train_info()
         _timing_event("training_completed", epochs=epochs_run,
                       seconds=time.perf_counter() - run_started)

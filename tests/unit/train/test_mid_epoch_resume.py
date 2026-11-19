@@ -301,12 +301,14 @@ def test_distributed_mid_epoch_checkpoint_rank_gate(
         )
         rank1.is_distributed = True
         monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
+        rank1.train_info.rank = 1
         rank1.maybe_save_checkpoint(0, local_step=step_interval)
 
         state_rank1 = Path(tmpdir) / "0" / "training_state.json"
         link_rank1 = Path(tmpdir) / f"epoch0_step{step_interval}"
         assert not state_rank1.exists()
         assert not link_rank1.exists()
+        assert not (Path(tmpdir) / "0" / "train_info.json").exists()
 
 
 class _CountingDataset(Dataset):
@@ -447,9 +449,9 @@ def test_trial_checkpoint_stops_and_resumes(
         loader = DataLoader(
             [{"document_ids": i, "error_records": 0} for i in range(4)]
         )
-        trainer = CpuTrainer(cast("SpeculatorModel", model), cfg, loader)
-        trainer.device_type = "cpu"
-        trainer.local_rank = "cpu"
+        trainer = CpuTrainer(
+            cast("SpeculatorModel", model), cfg, loader, device=torch.device("cpu")
+        )
         return trainer, model
 
     trial, model = make_trainer(config)

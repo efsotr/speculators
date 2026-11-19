@@ -128,42 +128,14 @@ class TestSpeculatorsPatch:
 
 
 # ---------------------------------------------------------------------------
-# _copy_train_command tests (checkpointer)
+# Training directory artifacts
 # ---------------------------------------------------------------------------
 
 
-class TestCopyTrainCommand:
-    def test_copies_into_epoch_dir(self, tmp_path: Path):
-        src_content = "# test content\ntrain.py --lr 1e-4\n"
-        (tmp_path / "train_command.txt").write_text(src_content)
-        (tmp_path / "0").mkdir()
-
-        cp = SingleGPUCheckpointer(str(tmp_path))
-        cp._copy_train_command(0)
-
-        copied = tmp_path / "0" / "train_command.txt"
-        assert copied.exists()
-        assert copied.read_text() == src_content
-
-    def test_noop_when_source_missing(self, tmp_path: Path):
-        (tmp_path / "0").mkdir()
-
-        cp = SingleGPUCheckpointer(str(tmp_path))
-        cp._copy_train_command(0)
-
-        assert not (tmp_path / "0" / "train_command.txt").exists()
-
-    def test_copies_into_string_epoch(self, tmp_path: Path):
+class TestTrainingDirectoryArtifacts:
+    def test_cleanup_keep_only_best_preserves_training_files(self, tmp_path: Path):
         (tmp_path / "train_command.txt").write_text("content")
-        (tmp_path / "interrupted").mkdir()
-
-        cp = SingleGPUCheckpointer(str(tmp_path))
-        cp._copy_train_command("interrupted")
-
-        assert (tmp_path / "interrupted" / "train_command.txt").exists()
-
-    def test_cleanup_keep_only_best_preserves_train_command(self, tmp_path: Path):
-        (tmp_path / "train_command.txt").write_text("content")
+        (tmp_path / "train_info.json").write_text("{}")
         (tmp_path / "0").mkdir()
         (tmp_path / "1").mkdir()
         (tmp_path / "1" / "model.safetensors").touch()
@@ -173,4 +145,5 @@ class TestCopyTrainCommand:
         cp.cleanup_keep_only_best(1)
 
         assert (tmp_path / "train_command.txt").exists()
+        assert (tmp_path / "train_info.json").exists()
         assert not (tmp_path / "0").exists()

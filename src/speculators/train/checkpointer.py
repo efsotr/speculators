@@ -20,7 +20,7 @@ from torch.nn.parallel import DistributedDataParallel
 from transformers.modeling_utils import PreTrainedModel
 
 from speculators.train.distributed import get_rank, is_distributed
-from speculators.utils.util import get_current_device
+from speculators.train.train_info import FILENAME as TRAIN_INFO_FILENAME
 
 logger = logging.getLogger("speculators")
 
@@ -164,11 +164,6 @@ class BaseCheckpointer:
 
     TRAIN_COMMAND_FILENAME = "train_command.txt"
 
-    def _copy_train_command(self, epoch: int | str) -> None:
-        src = self.path / self.TRAIN_COMMAND_FILENAME
-        if src.exists():
-            shutil.copy2(src, self.path / str(epoch) / self.TRAIN_COMMAND_FILENAME)
-
     @_rank0_only
     def save_val_metrics(self, epoch: int, val_metrics: dict[str, float]):
         path = self.val_metrics_path(epoch)
@@ -238,8 +233,6 @@ class BaseCheckpointer:
         if not keep_dir.exists() or not keep_dir.is_dir():
             raise FileNotFoundError(f"Best epoch dir does not exist: {keep_dir}")
 
-        train_cmd_file = self.path / self.TRAIN_COMMAND_FILENAME
-
         for child in self.path.iterdir():
             # Keep the symlink itself
             if child == best_link:
@@ -249,7 +242,7 @@ class BaseCheckpointer:
             if child == keep_dir:
                 continue
 
-            if child == train_cmd_file:
+            if child.name in (self.TRAIN_COMMAND_FILENAME, TRAIN_INFO_FILENAME):
                 continue
 
             # Delete numbered epoch directories and any other stray dirs/files
@@ -303,7 +296,7 @@ class SingleGPUCheckpointer(BaseCheckpointer):
     def load_model_state_dict(
         self, model: PreTrainedModel, float_dtype: torch.dtype | None = None
     ):
-        device = get_current_device()
+        device = str(model.device)
         full_state_dict = load_safetensors_state_dict(
             self.model_path(self.previous_epoch),
             device,
@@ -320,17 +313,16 @@ class SingleGPUCheckpointer(BaseCheckpointer):
         optimizer: OptimizerOrList,
         float_dtype: torch.dtype | None = None,
     ):
-        device = get_current_device()
-        loaded = torch.load(
-            self.optimizer_path(self.previous_epoch),
-            weights_only=True,
-            map_location=device,
-        )
-        optimizers = _as_list(optimizer)
-        loaded_list = loaded if isinstance(loaded, list) else [loaded]
         raw_model = (
             model.module if isinstance(model, DistributedDataParallel) else model
         )
+        loaded = torch.load(
+            self.optimizer_path(self.previous_epoch),
+            weights_only=True,
+            map_location=raw_model.device,
+        )
+        optimizers = _as_list(optimizer)
+        loaded_list = loaded if isinstance(loaded, list) else [loaded]
         dtype = float_dtype or raw_model.dtype
         for opt, state_dict in zip(optimizers, loaded_list, strict=True):
             opt.load_state_dict(convert_float_dtype(state_dict, dtype))
@@ -357,7 +349,6 @@ class SingleGPUCheckpointer(BaseCheckpointer):
         # Preserve the legacy single-optimizer format when there is only one.
         payload = state_dicts[0] if len(state_dicts) == 1 else state_dicts
         torch.save(payload, self.optimizer_path(epoch))
-        self._copy_train_command(epoch)
 
 
 class DistributedCheckpointer(BaseCheckpointer):
@@ -437,6 +428,5 @@ class DistributedCheckpointer(BaseCheckpointer):
             model.save_pretrained(self.path / str(epoch), state_dict=model_state_dict)
             patch_config_dtype(self.path / str(epoch) / "config.json", float_dtype)
             torch.save(optimizer_state_dict, self.optimizer_path(epoch))
-            self._copy_train_command(epoch)
 
         dist.barrier()

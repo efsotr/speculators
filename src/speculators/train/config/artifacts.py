@@ -65,10 +65,9 @@ def dump_yaml(cfg: "TrainConfig") -> str:
 
 
 def save(cfg: "TrainConfig", save_dir: str) -> None:
-    """Write ``run.yaml`` + ``train_command.txt`` next to the checkpoints.
+    """Export reproducibility artifacts to an explicitly selected directory.
 
-    Called at rank 0 by the training command so every checkpoint carries the
-    config that produced it. ``run.yaml`` is the clean resolved config (re-run via
+    ``run.yaml`` is the clean resolved config (re-run via
     ``--config run.yaml``); ``train_command.txt`` records the exact argv this
     config was resolved from plus the environment manifest.
     """

@@ -83,9 +83,9 @@ class TestTrainvLLM:
 
         assert p.returncode == 0
 
-        # Verify train_command.txt was saved and copied into epoch checkpoint dir
-        assert Path(SAVE_PATH, "train_command.txt").exists()
-        assert Path(SAVE_PATH, "0", "train_command.txt").exists()
+        assert (Path(SAVE_PATH).parent / "train_command.txt").exists()
+        assert Path(SAVE_PATH, "0", "train_info.json").exists()
+        assert not Path(SAVE_PATH, "0", "train_command.txt").exists()
 
         # Run trained speculator in vLLM
         run_vllm_engine(model_path=SAVE_PATH + "/0", tmp_path=tmp_path, prompts=prompts)

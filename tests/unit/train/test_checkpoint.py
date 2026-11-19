@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 
 from speculators.model import SpeculatorModel
 from speculators.train.checkpointer import SingleGPUCheckpointer
+from speculators.train.train_info import TrainInfo
 from speculators.train.trainer import Trainer, TrainerConfig
 
 
@@ -32,6 +33,10 @@ def _make_minimal_trainer(tmp_path: Path, checkpoint_freq: int, save_best: bool)
     trainer.train_loader = cast("DataLoader[Any]", [])
     trainer.val_loader = cast("DataLoader[Any]", [])
     trainer.checkpointer = SingleGPUCheckpointer(str(tmp_path))
+    trainer.training_dir = tmp_path
+    trainer.train_info = TrainInfo(0, False, None)
+    trainer.dataset_info = {}
+    trainer.run_config = {}
 
     trainer.model = cast("SpeculatorModel", object())
     trainer.optimizers = cast("list[torch.optim.Optimizer]", [object()])
@@ -168,6 +173,10 @@ def test_save_best_flag_changes_checkpoint_behavior(
         p.name for p in case_dir.iterdir() if p.is_dir() and p.name.isdigit()
     }
     assert remaining_dirs == expected_remaining_dirs
+    assert all(
+        (case_dir / epoch / "train_info.json").is_file()
+        for epoch in remaining_dirs
+    )
 
     best_path = case_dir / "checkpoint_best"
     assert best_path.exists()
@@ -288,3 +297,5 @@ def test_graceful_shutdown_saves_interrupted_checkpoint(
     trainer.run_training()
 
     assert "interrupted" in saved_labels
+    assert (tmp_path / "interrupted" / "train_info.json").is_file()
+    assert (tmp_path / "train_info.json").is_file()

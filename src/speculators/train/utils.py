@@ -110,8 +110,10 @@ def _save_speculators_patch(save_dir: Path, repo_root: Path | None, sha: str) ->
         logger.warning("Failed to save speculators.patch", exc_info=True)
 
 
-def save_train_command(save_path: str, argv: list[str] | None = None) -> None:
-    """Write train_command.txt and speculators.patch to *save_path*.
+def save_train_command(
+    save_path: str, argv: list[str] | None = None, *, include_patch: bool = True
+) -> None:
+    """Write train_command.txt and optionally speculators.patch to *save_path*.
 
     ``argv`` is the exact command the run was resolved from (``TrainConfig`` records
     it during resolution); it falls back to the live ``sys.argv`` when a caller has
@@ -143,4 +145,5 @@ def save_train_command(save_path: str, argv: list[str] | None = None) -> None:
     path = Path(save_path)
     path.mkdir(parents=True, exist_ok=True)
     atomic_write(path / "train_command.txt", content)
-    _save_speculators_patch(path, repo_root, sha)
+    if include_patch:
+        _save_speculators_patch(path, repo_root, sha)
