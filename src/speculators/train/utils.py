@@ -81,6 +81,8 @@ def normalize_counted_metrics(
     by world_size to compute the average across ranks.
     """
     normalized_keys: set[str] = set()
+    independent_accuracies = []
+    has_valid_independent_position = False
     for tk in [k for k in metrics if k.endswith("_total")]:
         prefix = tk.removesuffix("_total")
         sk = f"{prefix}_sum"
@@ -89,12 +91,22 @@ def normalize_counted_metrics(
             metrics[prefix] = metrics[sk] / total if total > 0 else 0.0
             del metrics[sk]
             normalized_keys.add(prefix)
+            if prefix.startswith("position_") and prefix.endswith("_greedy_independ_acc"):
+                independent_accuracies.append(metrics[prefix])
+                has_valid_independent_position |= total > 0
         del metrics[tk]
 
     if world_size > 1:
         for k in metrics:
             if k not in normalized_keys:
                 metrics[k] /= world_size
+
+    # Position denominators can differ. Sum the globally normalized accuracies
+    # and add one bonus token when there is at least one valid draft position.
+    if independent_accuracies:
+        metrics["greedy_independ_eal"] = (
+            1.0 + sum(independent_accuracies) if has_valid_independent_position else 0.0
+        )
 
     return metrics
 
