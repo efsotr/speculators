@@ -163,4 +163,6 @@ class TrainInfo:
             "validation_runs": self.validation_runs,
         }
         path.mkdir(parents=True, exist_ok=True)
-        atomic_write(path / FILENAME, json.dumps(payload, allow_nan=False) + "\n")
+        atomic_write(
+            path / FILENAME, json.dumps(payload, indent=2, allow_nan=False) + "\n"
+        )
