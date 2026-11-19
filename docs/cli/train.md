@@ -259,6 +259,8 @@ All speculator types (except `mtp`) use sliding window attention on all draft la
 
 ### Checkpoint Arguments
 
+- **`--max-try-steps`** (int, optional) Stop at the given global optimizer step and save a resumable checkpoint even when the regular checkpoint policy would skip it. The learning-rate schedule and data plan still use the original training configuration. Remove or raise the limit to resume training.
+
 - **`--checkpoint-freq`** (int, default: `1`) Save a checkpoint every N epochs. Must be ≥ 1.
 
 - **`--save-best`** (flag) Save a symbolic link to the checkpoint with the lowest validation loss.

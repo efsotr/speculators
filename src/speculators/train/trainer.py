@@ -196,6 +196,7 @@ class TrainerConfig(NamedTuple):
     emulate_precision_casts: bool = False
     pad_target_hidden_states: bool = False
     target_seq_len: int = 8192
+    max_try_steps: int | None = None
 
 
 def _resolve_scheduler_steps(
@@ -517,8 +518,8 @@ class Trainer:
         for scheduler in self.schedulers:
             scheduler.step()
 
-    def _prepare_resume_skip(self, epoch: int) -> int:
-        """Prepare fast-skip state for mid-epoch resume and return skipped steps."""
+    def _prepare_resume_skip(self, epoch: int) -> tuple[int, int]:
+        """Return the number of batches skipped by the sampler and by the loop."""
         skip_steps = 0
         if epoch == getattr(self, "current_epoch", epoch):
             skip_steps = getattr(self, "_resume_local_step", 0)
@@ -549,7 +550,7 @@ class Trainer:
                 "Sampler lacks fast-skip API; resume will replay "
                 f"{skip_steps} batches from the start of the epoch."
             )
-        return skip_steps
+        return (skip_steps, 0) if has_fast_skip_api else (0, skip_steps)
 
     def _check_shutdown_boundary(self):
         handler = getattr(self, "_shutdown_handler", None)
@@ -573,7 +574,9 @@ class Trainer:
         num_steps = len(self.train_loader)
 
         # Determine how many batches to skip for mid-epoch resume.
-        skip_steps = self._prepare_resume_skip(epoch)
+        skip_steps, replay_steps = self._prepare_resume_skip(epoch)
+        max_steps = self.config.max_steps
+        max_try_steps = self.config.max_try_steps
 
         train_loader = self.train_loader
         if self.rank == 0:
@@ -599,8 +602,9 @@ class Trainer:
 
             timer.mark_value("start", t_before_fetch)
             will_stop = (
-                self.config.max_steps is not None
-                and self.global_step + 1 >= self.config.max_steps
+                max_steps is not None and self.global_step + 1 >= max_steps
+            ) or (
+                max_try_steps is not None and self.global_step + 1 >= max_try_steps
             )
             timer.mark("queue")
             recovery.consume(
@@ -611,6 +615,8 @@ class Trainer:
                     will_stop=will_stop,
                 ),
             )
+            if local_step_rel <= replay_steps:
+                continue
             timer.mark("pre_h2d")
             gpu_batch = {
                 k: v.to(self.local_rank, non_blocking=True)
@@ -708,10 +714,15 @@ class Trainer:
             if step_callback is not None:
                 step_callback()
 
-            if (
-                self.config.max_steps is not None
-                and self.global_step >= self.config.max_steps
-            ):
+            if max_try_steps is not None and self.global_step >= max_try_steps:
+                self.maybe_save_checkpoint(
+                    epoch,
+                    local_step=local_step if local_step < num_steps else 0,
+                    force=True,
+                )
+                break
+
+            if will_stop:
                 break
 
             if (
@@ -804,8 +815,10 @@ class Trainer:
 
         return val_metrics
 
-    def maybe_save_checkpoint(self, epoch: int | str, local_step: int = 0):
-        if epoch != "interrupted" and (
+    def maybe_save_checkpoint(
+        self, epoch: int | str, local_step: int = 0, *, force: bool = False
+    ):
+        if not force and epoch != "interrupted" and (
             self.config.save_best
             or (
                 self.config.checkpoint_freq >= 1
@@ -880,9 +893,22 @@ class Trainer:
             _timing_event("startup", seconds=max(0.0, time.time() - float(launch_unix)))
         _timing_event("training_started")
         n_epochs = self.config.num_epochs
+        max_steps = self.config.max_steps
+        max_try_steps = self.config.max_try_steps
+        epochs_run = 0
         for epoch in range(self.current_epoch, n_epochs):
+            if (max_steps is not None and self.global_step >= max_steps) or (
+                max_try_steps is not None and self.global_step >= max_try_steps
+            ):
+                break
             root_logger.info(f"Training epoch {epoch + 1}/{n_epochs} started")
             self.train_epoch(epoch)
+            epochs_run += 1
+            if max_try_steps is not None and self.global_step >= max_try_steps:
+                if self.is_distributed:
+                    dist.barrier()
+                root_logger.info(f"Reached max_try_steps at step {self.global_step}")
+                break
             root_logger.info(f"Training epoch {epoch + 1}/{n_epochs} completed")
 
             if self.is_distributed:
@@ -913,5 +939,5 @@ class Trainer:
 
             if self.is_distributed:
                 dist.barrier()
-        _timing_event("training_completed", epochs=n_epochs - self.current_epoch,
+        _timing_event("training_completed", epochs=epochs_run,
                       seconds=time.perf_counter() - run_started)

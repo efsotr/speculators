@@ -414,3 +414,55 @@ def test_fast_skip_sampler_slice_avoids_skipped_getitem(
         assert sampler.generated_for_epoch == 0
         assert sampler._cached_generated_batches == (0, sampler.all_batches[3:])
         assert dataset.seen_indices == list(range(3, 10))
+
+
+@pytest.mark.parametrize(("limit", "local_step"), [(5, 1), (8, 0)])
+def test_trial_checkpoint_stops_and_resumes(
+    tmp_path: Path, limit: int, local_step: int
+) -> None:
+    class CpuTrainer(_MockTrainer):
+        train_epoch = Trainer.train_epoch
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(()))
+            self.seen: list[int] = []
+
+        def forward(self, document_ids, **kwargs):
+            self.seen.append(document_ids.item())
+            return None, self.weight.square(), {}
+
+    config = TrainerConfig(
+        lr=1e-4,
+        save_path=str(tmp_path),
+        num_epochs=3,
+        save_best=True,
+        max_steps=10,
+        max_try_steps=limit,
+    )
+
+    def make_trainer(cfg):
+        model = Model()
+        loader = DataLoader(
+            [{"document_ids": i, "error_records": 0} for i in range(4)]
+        )
+        trainer = CpuTrainer(cast("SpeculatorModel", model), cfg, loader)
+        trainer.device_type = "cpu"
+        trainer.local_rank = "cpu"
+        return trainer, model
+
+    trial, model = make_trainer(config)
+    trial.run_training()
+    assert trial.global_step == limit
+    assert model.seen == [i % 4 for i in range(limit)]
+    state = json.loads((tmp_path / "1" / "training_state.json").read_text())
+    assert state == {"epoch": 1, "local_step": local_step, "global_step": limit}
+
+    resumed, model = make_trainer(config._replace(resume_from_checkpoint=True))
+    resumed.run_training()
+    assert model.seen == []
+    resumed.config = resumed.config._replace(max_try_steps=None)
+    resumed.run_training()
+    assert resumed.global_step == 10
+    assert model.seen == [i % 4 for i in range(limit, 10)]

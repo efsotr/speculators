@@ -52,6 +52,14 @@ def test_max_steps_sets_scheduler_total_steps():
     assert warmup_steps == 0  # 1% of 30
 
 
+@pytest.mark.parametrize("max_steps", [None, 30])
+def test_max_try_steps_keeps_original_scheduler_horizon(max_steps):
+    original = make_config(max_steps=max_steps, scheduler_warmup_ratio=0.1)
+    trial = original._replace(max_try_steps=3)
+
+    assert _resolve_scheduler_steps(trial, 20) == _resolve_scheduler_steps(original, 20)
+
+
 def test_scheduler_total_steps_override_wins_over_max_steps():
     warmup_steps, total_steps = _resolve_scheduler_steps(
         make_config(max_steps=30, scheduler_total_steps=250),

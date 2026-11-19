@@ -278,7 +278,6 @@ def test_real_train_loop_finishes_one_batch_before_save(original_handlers):
     trainer.is_distributed = False
     trainer.global_step = 1  # Disable optional metrics for this batch.
     trainer.train_loader = torch.utils.data.DataLoader([{"error_records": 0}] * 3)
-    trainer._prepare_resume_skip = lambda epoch: 0
     trainer.checkpointer = _Checkpointer()
     saved = []
     trainer.maybe_save_checkpoint = lambda label: saved.append(

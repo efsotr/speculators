@@ -610,6 +610,13 @@ class TrainerArgs(_Group):
         "epochs). Useful for quick smoke runs. Default: run all epochs to completion.",
     )
 
+    max_try_steps: int | None = Field(
+        default=None,
+        ge=1,
+        description="Stop and save a resumable checkpoint at this global optimizer "
+        "step while keeping the original learning-rate schedule and data plan.",
+    )
+
     @field_validator("checkpoint_freq")
     @classmethod
     def _validate_checkpoint_freq(cls, v: float) -> float:
