@@ -14,7 +14,7 @@ from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.model import SpeculatorModel
 from speculators.models.dflash.core import DFlashDraftModel
 from speculators.models.dspark.config import DSparkSpeculatorConfig
-from speculators.models.dspark.metrics import compute_metrics
+from speculators.models.dspark.metrics import compute_metrics, sample_vat_uniform
 from speculators.models.dspark.model_definitions import ConfidenceHead, MarkovHead
 from speculators.models.utils import conditional_torch_compile
 
@@ -120,7 +120,31 @@ class DSparkDraftModel(DFlashDraftModel):
             "dpa_dev_prefix_only": kwargs.get("dpa_dev_prefix_only", False),
             "dpace_alpha": dpace_alpha,
         }
+        if per_position_loss_weight == "vat" and not TRAJECTORY_LOSSES.intersection(
+            loss_config
+        ):
+            shared["vat_seed"] = kwargs.get("seed", 42)
         return dict(shared), dict(shared)
+
+    @torch.compiler.disable
+    def prepare_training_inputs(
+        self, *args, vat_seed=None, vat_batch=(0, 0, 0), **kwargs
+    ):
+        prepared = super().prepare_training_inputs(*args, **kwargs)
+        if prepared.get("per_position_loss_weight") == "vat" and not (
+            TRAJECTORY_LOSSES.intersection(prepared.get("loss_config") or {})
+        ):
+            epoch, step, rank = vat_batch
+            base = torch.initial_seed() if vat_seed is None else vat_seed
+            # Reserve separate seed sequences for training and validation.
+            position_seed = base + 1_000_003 * step + 97_409 * epoch + 65_537 * rank
+            seed = (2 * position_seed + int(not self.training)) % (2**64)
+            prepared["vat_uniform"] = sample_vat_uniform(
+                (1, prepared["max_anchors"] * self.block_size),
+                prepared["hidden_states"].device,
+                seed,
+            )
+        return prepared
 
     @conditional_torch_compile
     def forward(
@@ -142,6 +166,7 @@ class DSparkDraftModel(DFlashDraftModel):
         dpa_dev_alpha: float = 0.5,
         dpa_dev_prefix_only: bool = False,
         dpace_alpha: float = 0.5,
+        vat_uniform: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden, logits, targets, aligned_loss_mask, anchored_block_indices = (
@@ -245,5 +270,6 @@ class DSparkDraftModel(DFlashDraftModel):
                 else None
             ),
             compute_prob_metrics=not self.use_draft_vocab,
+            vat_uniform=vat_uniform,
         )
         return None, loss, metrics

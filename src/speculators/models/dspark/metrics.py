@@ -63,8 +63,15 @@ def _masked_decayed_mean(
     )
 
 
+@torch.compiler.disable
+def sample_vat_uniform(shape, device, seed=None):
+    generator = torch.Generator(device=device)
+    generator.manual_seed(torch.initial_seed() if seed is None else seed)
+    return torch.rand(shape, device=device, dtype=torch.float32, generator=generator)
+
+
 @torch.no_grad()
-def _vat_weights(logits, targets, data_token_ids, loss_mask, *, block_size, gamma):
+def _vat_weights(logits, targets, data_token_ids, loss_mask, *, block_size, gamma, uniform):
     """Sample acceptance on aligned data tokens and decay after the first rejection."""
     if data_token_ids is None or data_token_ids.shape != logits.shape[:-1]:
         raise ValueError("VAT requires aligned data_token_ids")
@@ -73,9 +80,9 @@ def _vat_weights(logits, targets, data_token_ids, loss_mask, *, block_size, gamm
     log_q = observed_log_probability(logits, ids)
     log_p = observed_log_probability(targets, ids)
     acceptance = (log_q - log_p).clamp(max=0.0).exp()
-    rejected = (valid & (torch.rand_like(acceptance) >= acceptance)).reshape(
-        -1, block_size
-    )
+    if uniform is None:
+        uniform = sample_vat_uniform(acceptance.shape, acceptance.device)
+    rejected = (valid & (uniform >= acceptance)).reshape(-1, block_size)
     positions = torch.arange(block_size, device=logits.device)
     first_rejection = torch.where(rejected, positions, block_size).amin(
         dim=-1, keepdim=True
@@ -107,6 +114,7 @@ def compute_metrics(  # noqa: C901
     data_token_ids: torch.Tensor | None = None,
     shared_weights: dict | None = None,
     compute_prob_metrics: bool = False,
+    vat_uniform: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the DSpark loss and a metrics dict (``*_sum``/``*_total`` pairs)."""
 
@@ -143,7 +151,7 @@ def compute_metrics(  # noqa: C901
     elif per_position_loss_weight == "vat":
         weights = _vat_weights(
             logits, targets, data_token_ids, loss_mask,
-            block_size=block_size, gamma=gamma,
+            block_size=block_size, gamma=gamma, uniform=vat_uniform,
         )
 
         def decay_fn(*_args, **_kwargs):

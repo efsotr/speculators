@@ -665,6 +665,8 @@ class Trainer:
             ):
                 timer.mark("fetch")
                 call_kwargs = dict(self.config.train_call_kwargs or {})
+                if "vat_seed" in call_kwargs:
+                    call_kwargs["vat_batch"] = (epoch, self.global_step, self.rank)
                 if "anchor_sampling" in call_kwargs:
                     call_kwargs.update(
                         anchor_sampling_epoch=epoch,
@@ -845,6 +847,8 @@ class Trainer:
                 self.device_type, dtype=self.config.hidden_states_dtype
             ):
                 call_kwargs = dict(self.config.val_call_kwargs or {})
+                if "vat_seed" in call_kwargs:
+                    call_kwargs["vat_batch"] = (epoch, i, self.rank)
                 if "anchor_sampling" in call_kwargs:
                     call_kwargs.update(
                         anchor_sampling_epoch=epoch,
