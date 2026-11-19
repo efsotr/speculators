@@ -658,14 +658,6 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             input_ids = torch.roll(input_ids, -1, dims=1)
         return input_ids[:, block_indices]
 
-    def _trajectory_document_mask(self, loss_mask, document_ids, block_indices):
-        anchor_documents = document_ids[:, block_indices[:: self.block_size]]
-        documents = self._aligned_data_token_ids(document_ids, block_indices)
-        same_document = (
-            documents.reshape(-1, self.block_size) == anchor_documents.reshape(-1, 1)
-        )
-        return loss_mask * same_document.reshape_as(loss_mask)
-
     def _backbone_forward(
         self,
         hidden_states: torch.Tensor,  # [1, total_seq_len, num_hidden*hidden_size]
@@ -810,13 +802,6 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         )
         trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config or {}))
         uses_dataset_loss = trajectory or "ce_gt" in (loss_config or {})
-        trajectory_mask = None
-        if trajectory or not self.use_draft_vocab:
-            trajectory_mask = self._trajectory_document_mask(
-                aligned_loss_mask, document_ids, block_indices
-            )
-        if trajectory:
-            aligned_loss_mask = trajectory_mask
         loss, metrics = compute_metrics(
             logits,
             targets,
@@ -851,7 +836,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                 or not self.use_draft_vocab
                 else None
             ),
-            real_loss_mask=None if self.use_draft_vocab else trajectory_mask,
+            compute_prob_metrics=not self.use_draft_vocab,
             sample_from_anchor=self.config.sample_from_anchor,
         )
         metrics.update(getattr(self, "_anchor_sampling_metrics", {}))

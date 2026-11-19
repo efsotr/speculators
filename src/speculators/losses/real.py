@@ -2,7 +2,7 @@
 
 import torch
 
-TRAJECTORY_LOSSES = {"REAL"}
+TRAJECTORY_LOSSES = {"REAL", "raw_path"}
 
 
 @torch.compile(dynamic=True)
@@ -42,6 +42,7 @@ def trajectory_loss(
     block_size,
     start_pos,
     tv_loss_fn,
+    raw_path,
     ce_weight,
     ce_position_weights=None,
     tv_cache=None,
@@ -66,6 +67,18 @@ def trajectory_loss(
     )
     log_b = torch.where(valid, log_ratio.clamp(max=0.0), 0.0)
     inclusive = log_b.cumsum(-1)
+    if raw_path:
+        denominator = valid.any(-1).sum().clamp_min(1) * window
+        with torch.no_grad():
+            survival = torch.where(valid, inclusive.exp(), 0.0)
+            # Sum of all survival terms containing b_i equals W_i * b_i.
+            weights = survival.flip(-1).cumsum(-1).flip(-1)
+            weights = torch.where(valid & (log_ratio < 0), weights, 0.0)
+        weighted_ce = (weights * torch.where(valid, -log_q, 0.0)).sum() / denominator
+        objective = valid.any().float() - survival.sum() / denominator
+        loss = objective + (weighted_ce - weighted_ce.detach())
+        return loss, {"raw_path_loss": objective.detach()}
+
     tv = tv_loss_fn(logits, targets)
     if tv_cache is not None:
         tv_cache["tv"] = tv.detach()

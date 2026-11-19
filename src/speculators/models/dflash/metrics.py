@@ -44,7 +44,7 @@ def compute_metrics(  # noqa: C901
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
     tv_loss_fn=tv_loss,
-    real_loss_mask: torch.Tensor | None = None,
+    compute_prob_metrics: bool = False,
 ) -> tuple[torch.Tensor, dict]:
     """Compute loss and accuracy metrics for draft model predictions.
 
@@ -61,7 +61,7 @@ def compute_metrics(  # noqa: C901
     Returns:
         Tuple of (loss, metrics_dict) where metrics_dict contains:
             - loss: Scalar loss value
-            - full_acc: Overall accuracy
+            - greedy_independ_eal: Pooled independent greedy accuracy
             - position_{i}_greedy_independ_acc: Argmax agreement at position i
             - position_{i}_greedy_acc: Fraction of blocks accepted through position i
             - greedy_eal: Expected Accepted Length, the mean per-block accepted run
@@ -163,8 +163,8 @@ def compute_metrics(  # noqa: C901
 
     # Start position: 0 if sample_from_anchor else 1 (skip anchor)
     start_pos = 0 if sample_from_anchor else 1
-    metrics["full_acc_sum"] = correct_per_pos[start_pos:].sum()
-    metrics["full_acc_total"] = total_per_pos[start_pos:].sum()
+    metrics["greedy_independ_eal_sum"] = correct_per_pos[start_pos:].sum()
+    metrics["greedy_independ_eal_total"] = total_per_pos[start_pos:].sum()
 
     for pos in range(start_pos, block_size):
         metrics[f"position_{pos}_greedy_independ_acc_sum"] = correct_per_pos[pos]
@@ -180,11 +180,7 @@ def compute_metrics(  # noqa: C901
         )
     )
 
-    if (
-        real_loss_mask is not None
-        and data_token_ids is not None
-        and start_pos < block_size
-    ):
+    if compute_prob_metrics and data_token_ids is not None and start_pos < block_size:
         with torch.no_grad():
             if accept_rate is None:
                 tv = tv_cache.get("tv")
@@ -196,7 +192,7 @@ def compute_metrics(  # noqa: C901
                 logits,
                 targets,
                 data_token_ids,
-                real_loss_mask,
+                loss_mask,
                 accept_rate,
                 block_size=block_size,
                 start_pos=start_pos,

@@ -29,6 +29,15 @@ class _CodeFilter(logging.Filter):
         return _artifact(record) not in {"graph_code", "output_code"}
 
 
+class _CodeFileHandler(logging.FileHandler):
+    def __init__(self, path: Path):
+        super().__init__(path, delay=True)
+
+    def _open(self):
+        Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
+        return super()._open()
+
+
 def setup_torch_logging(cfg) -> Path:
     """Apply flat logging config after root logging setup, before compilation.
 
@@ -42,7 +51,6 @@ def setup_torch_logging(cfg) -> Path:
     destination = Path(
         cfg.torch_graph_code_dir or Path(cfg.log_dir) / "torch_graph_code"
     )
-    destination.mkdir(parents=True, exist_ok=True)
     code_path = destination / f"rank{os.environ.get('RANK', '0')}_graph_code.txt"
 
     # Remove only our previous file handlers on repeated setup.
@@ -63,12 +71,12 @@ def setup_torch_logging(cfg) -> Path:
             os.environ.pop("TORCH_LOGS", None)
         else:
             os.environ["TORCH_LOGS"] = previous
-    code_handler = logging.FileHandler(code_path)
+    code_handler = _CodeFileHandler(code_path)
     code_handler._speculators_graph_code = True
     code_handler.setLevel(logging.DEBUG)
     code_handler.setFormatter(formatter)
     code_handler.addFilter(_CodeFilter("graph_code"))
-    output_handler = logging.FileHandler(
+    output_handler = _CodeFileHandler(
         destination / f"rank{os.environ.get('RANK', '0')}_output_code.txt"
     )
     output_handler._speculators_graph_code = True

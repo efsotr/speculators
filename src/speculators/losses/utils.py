@@ -247,6 +247,7 @@ _FUSED_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "ce": ce_loss,
     "ce_gt": ce_gt_loss,
     "REAL": trajectory_loss,
+    "raw_path": trajectory_loss,
     "tv": tv_loss,
     "nla": neg_log_acceptance_loss,
     "lk_hybrid": lk_hybrid_loss,
@@ -261,6 +262,7 @@ _EAGER_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "ce": eager.ce_loss,
     "ce_gt": eager.ce_gt_loss,
     "REAL": trajectory_loss,
+    "raw_path": trajectory_loss,
     "tv": eager.tv_loss,
     "nla": eager.neg_log_acceptance_loss,
     "lk_hybrid": eager.lk_hybrid_loss,
@@ -316,6 +318,8 @@ def resolve_loss_config(  # noqa: C901
                 f"Unknown loss function '{name}' in loss config. "
                 f"Choose from: {sorted(loss_fn_map)}"
             )
+        if name == "raw_path":
+            raise ValueError("raw_path must be configured as a standalone loss name")
         if not isinstance(weight, (int, float)):
             raise ValueError(
                 f"Loss weight for '{name}' must be a number, "
@@ -374,6 +378,7 @@ def compound_loss(  # noqa: C901, PLR0917
     if TRAJECTORY_LOSSES.intersection(loss_config):
         if block_size is None:
             raise ValueError("Trajectory losses require a block size")
+        raw_path = "raw_path" in loss_config
         return trajectory_loss(
             logits,
             targets,
@@ -383,9 +388,14 @@ def compound_loss(  # noqa: C901, PLR0917
             start_pos=start_pos,
             tv_loss_fn=tv_loss_fn,
             tv_cache=tv_cache,
-            ce_weight=loss_config["ce_gt"][1],
-            ce_position_weights=dflash_loss_decay(
-                pos_idx.float(), gamma, sample_from_anchor=start_pos == 0
+            raw_path=raw_path,
+            ce_weight=0.0 if raw_path else loss_config["ce_gt"][1],
+            ce_position_weights=(
+                dflash_loss_decay(
+                    pos_idx.float(), gamma, sample_from_anchor=start_pos == 0
+                )
+                if not raw_path
+                else None
             ),
         )
 

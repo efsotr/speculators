@@ -288,8 +288,8 @@ class TestComputeMetrics:
         assert isinstance(metrics, dict)
         assert "loss_sum" in metrics
         assert "loss_total" in metrics
-        assert "full_acc_sum" in metrics
-        assert "full_acc_total" in metrics
+        assert "greedy_independ_eal_sum" in metrics
+        assert "greedy_independ_eal_total" in metrics
 
     def test_per_position_keys(self):
         B, T, V = 1, 8, 10
@@ -333,8 +333,8 @@ class TestComputeMetrics:
             pred_ids, target_ids, loss_mask, pos_idx, 4
         )
         # full counts = sum of positions 1+ (position 0 excluded)
-        assert torch.isclose(metrics["full_acc_sum"], expected_correct[1:].sum())
-        assert torch.isclose(metrics["full_acc_total"], expected_total[1:].sum())
+        assert torch.isclose(metrics["greedy_independ_eal_sum"], expected_correct[1:].sum())
+        assert torch.isclose(metrics["greedy_independ_eal_total"], expected_total[1:].sum())
         for i in range(1, 4):
             assert torch.isclose(
                 metrics[f"position_{i}_greedy_independ_acc_sum"], expected_correct[i]
@@ -429,7 +429,7 @@ def test_real_metrics_pool_position_scores_over_blocks(sample_from_anchor):
         block_size,
         sample_from_anchor=sample_from_anchor,
         data_token_ids=ids.reshape_as(mask),
-        real_loss_mask=mask,
+        compute_prob_metrics=True,
         tv_loss_fn=tv_loss,
     )
     original_loss, original_metrics = compute_metrics(
@@ -473,7 +473,7 @@ def test_real_metrics_use_tv_once_and_produce_no_gradients(train_with_tv):
         loss_config=config,
         tv_loss_fn=tracked_tv,
         data_token_ids=ids,
-        real_loss_mask=mask,
+        compute_prob_metrics=True,
     )
 
     assert tv_grad_modes == [train_with_tv]

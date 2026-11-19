@@ -1,7 +1,6 @@
 """Runtime-aligned selector loss and metrics for DFlash2.
 
 Greedy and probabilistic prefix metrics use the teacher-forced selector path.
-``accept_len`` reports the analytical TV-overlap estimate over unary logits.
 """
 
 from collections.abc import Callable
@@ -172,7 +171,7 @@ def compute_metrics(
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
     dpa_dev_weights: dict | None = None,
-    real_loss_mask: torch.Tensor | None = None,
+    compute_prob_metrics: bool = False,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine the unary DFlash objective with a K-way selector objective."""
     if "REAL" in loss_config:
@@ -300,25 +299,16 @@ def compute_metrics(
 
         independent_sums = (correct_blocks & draft_valid).sum(dim=0).float()
         independent_totals = draft_valid.sum(dim=0).float()
-        metrics["full_acc_sum"] = independent_sums.sum()
-        metrics["full_acc_total"] = independent_totals.sum()
+        metrics["greedy_independ_eal_sum"] = independent_sums.sum()
+        metrics["greedy_independ_eal_total"] = independent_totals.sum()
         for offset, pos in enumerate(range(start_pos, block_size)):
             metrics[f"position_{pos}_greedy_independ_acc_sum"] = independent_sums[offset]
             metrics[f"position_{pos}_greedy_independ_acc_total"] = (
                 independent_totals[offset]
             )
 
-        if (
-            real_loss_mask is not None
-            and data_token_ids is not None
-            and start_pos < block_size
-        ):
-            prefix_valid = (
-                real_loss_mask.reshape(num_blocks, block_size)[:, start_pos:]
-                .bool()
-                .cumprod(-1)
-                .bool()
-            )
+        if compute_prob_metrics and data_token_ids is not None and start_pos < block_size:
+            prefix_valid = draft_valid.cumprod(-1).bool()
             token_ids = data_token_ids.reshape(num_blocks, block_size)[:, start_pos:]
             token_ids = torch.where(prefix_valid, token_ids, 0).unsqueeze(-1)
             candidate_ids = serving_candidate_ids.reshape(num_blocks, block_size, top_k)

@@ -182,7 +182,7 @@ def test_real_model_metrics(kind):
         "loss_config": config,
         "tv_loss_fn": tv_fn,
         "data_token_ids": token_ids,
-        "real_loss_mask": mask,
+        "compute_prob_metrics": True,
         "loss_normalization": "token_count",
         "gamma": gamma,
         "per_position_loss_weight": "dpace",

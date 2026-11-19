@@ -79,17 +79,12 @@ class TestComputeMetrics:
         assert torch.isfinite(loss)
         # Matching distributions -> CE/TV ~ 0 and acceptance ~ 1.
         assert float(loss) < 1e-2
-        accept = metrics["accept_rate_sum"] / metrics["accept_rate_total"]
-        assert float(accept) > 0.99
-        # One draft slot per block accepted w.p. ~1, plus the bonus token -> ~2.
-        accept_len = metrics["accept_len_sum"] / metrics["accept_len_total"]
-        assert abs(float(accept_len) - 2.0) < 1e-2
         eal = metrics["greedy_eal_sum"] / metrics["greedy_eal_total"]
         assert abs(float(eal) - 2.0) < 1e-2
 
     def test_perfect_draft_anchor_sampled_includes_slot0(self):
         # sample_from_anchor=True (default): slot 0 is the first real prediction,
-        # so every position is supervised and accept_len counts all draft slots.
+        # so every position is supervised and greedy EAL counts all draft slots.
         ids = torch.tensor([[0, 1, 0, 2]])
         logits = _ids_to_logits(ids, 8)
         targets = logits.clone()
@@ -105,27 +100,8 @@ class TestComputeMetrics:
         )
         assert torch.isfinite(loss)
         assert float(loss) < 1e-2
-        accept = metrics["accept_rate_sum"] / metrics["accept_rate_total"]
-        assert float(accept) > 0.99
-        # Two draft slots per block accepted w.p. ~1, plus the bonus token -> ~3.
-        accept_len = metrics["accept_len_sum"] / metrics["accept_len_total"]
-        assert abs(float(accept_len) - 3.0) < 1e-2
         eal = metrics["greedy_eal_sum"] / metrics["greedy_eal_total"]
         assert abs(float(eal) - 3.0) < 1e-2
-
-    def test_accept_rate_equals_softmax_overlap(self):
-        """accept_rate (now 1 - tv) matches the explicit softmax-overlap formula."""
-        torch.manual_seed(0)
-        logits = torch.randn(1, 4, 32) * 3
-        targets = torch.randn(1, 4, 32) * 3
-        loss_mask = torch.ones(1, 4, dtype=torch.float32)
-        _, metrics = compute_metrics(
-            logits, targets, None, loss_mask, 2, loss_config=_DEFAULT_LOSS
-        )
-        draft_p = torch.softmax(logits.float(), dim=-1)
-        target_p = torch.softmax(targets.float(), dim=-1)
-        overlap = torch.minimum(draft_p, target_p).sum(dim=-1)
-        assert torch.isclose(metrics["accept_rate_sum"], overlap.sum(), atol=1e-5)
 
     def test_confidence_target_is_overlap(self):
         # When draft == target, accept rate == 1, so a confidence logit that is
@@ -286,13 +262,12 @@ class TestComputeMetrics:
             "loss_total",
             "ce_loss_sum",
             "tv_loss_sum",
-            "full_acc_sum",
-            "full_acc_total",
+            "greedy_independ_eal_sum",
+            "greedy_independ_eal_total",
             "position_1_greedy_independ_acc_sum",
-            "accept_len_sum",
-            "accept_len_total",
             "confidence_cumprod_bias_sum",
         ):
             assert key in metrics
+        assert not any(key.startswith(("accept_len_", "accept_rate_")) for key in metrics)
         # all metric values must be tensors (so dist.reduce works in the trainer)
         assert all(torch.is_tensor(v) for v in metrics.values())
