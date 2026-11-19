@@ -84,7 +84,7 @@ class TestComputeMetrics:
         # One draft slot per block accepted w.p. ~1, plus the bonus token -> ~2.
         accept_len = metrics["accept_len_sum"] / metrics["accept_len_total"]
         assert abs(float(accept_len) - 2.0) < 1e-2
-        eal = metrics["eal_sum"] / metrics["eal_total"]
+        eal = metrics["argmax_eal_sum"] / metrics["argmax_eal_total"]
         assert abs(float(eal) - 2.0) < 1e-2
 
     def test_perfect_draft_anchor_sampled_includes_slot0(self):
@@ -110,7 +110,7 @@ class TestComputeMetrics:
         # Two draft slots per block accepted w.p. ~1, plus the bonus token -> ~3.
         accept_len = metrics["accept_len_sum"] / metrics["accept_len_total"]
         assert abs(float(accept_len) - 3.0) < 1e-2
-        eal = metrics["eal_sum"] / metrics["eal_total"]
+        eal = metrics["argmax_eal_sum"] / metrics["argmax_eal_total"]
         assert abs(float(eal) - 3.0) < 1e-2
 
     def test_accept_rate_equals_softmax_overlap(self):
@@ -288,7 +288,7 @@ class TestComputeMetrics:
             "tv_loss_sum",
             "full_acc_sum",
             "full_acc_total",
-            "position_1_acc_sum",
+            "position_1_argmax_acc_sum",
             "accept_len_sum",
             "accept_len_total",
             "confidence_cumprod_bias_sum",

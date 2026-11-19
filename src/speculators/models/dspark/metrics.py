@@ -268,8 +268,8 @@ def compute_metrics(  # noqa: C901
     metrics["full_acc_sum"] = correct_per_pos[start_pos:].sum()
     metrics["full_acc_total"] = total_per_pos[start_pos:].sum()
     for pos in range(start_pos, block_size):
-        metrics[f"position_{pos}_acc_sum"] = correct_per_pos[pos]
-        metrics[f"position_{pos}_acc_total"] = total_per_pos[pos]
+        metrics[f"position_{pos}_argmax_acc_sum"] = correct_per_pos[pos]
+        metrics[f"position_{pos}_argmax_acc_total"] = total_per_pos[pos]
 
     # Greedy counterpart to accept_len, on the same per-block/bonus-token
     # convention, so DFlash-family runs compare on one number.
@@ -277,8 +277,8 @@ def compute_metrics(  # noqa: C901
         (pred_ids == target_ids).reshape(num_blocks, block_size)[:, start_pos:],
         draft_mask.to(torch.bool),
     )
-    metrics["eal_sum"] = eal_sum
-    metrics["eal_total"] = eal_total
+    metrics["argmax_eal_sum"] = eal_sum
+    metrics["argmax_eal_total"] = eal_total
 
     if (
         real_loss_mask is not None

@@ -62,8 +62,8 @@ def compute_metrics(  # noqa: C901
         Tuple of (loss, metrics_dict) where metrics_dict contains:
             - loss: Scalar loss value
             - full_acc: Overall accuracy
-            - position {i} acc: Accuracy at position i within blocks
-            - eal: Expected Accepted Length, the mean per-block accepted run
+            - position_{i}_argmax_acc: Argmax agreement at position i within blocks
+            - argmax_eal: Expected Accepted Length, the mean per-block accepted run
               plus the verifier's bonus token (headline metric)
     """
     if loss_config is None:
@@ -166,8 +166,8 @@ def compute_metrics(  # noqa: C901
     metrics["full_acc_total"] = total_per_pos[start_pos:].sum()
 
     for pos in range(start_pos, block_size):
-        metrics[f"position_{pos}_acc_sum"] = correct_per_pos[pos]
-        metrics[f"position_{pos}_acc_total"] = total_per_pos[pos]
+        metrics[f"position_{pos}_argmax_acc_sum"] = correct_per_pos[pos]
+        metrics[f"position_{pos}_argmax_acc_total"] = total_per_pos[pos]
 
     # Counted per block so the accepted run is formed before any averaging; the
     # sum/total pair then pools across batches and ranks like every other metric.
@@ -175,8 +175,8 @@ def compute_metrics(  # noqa: C901
         (pred_ids == target_ids).reshape(-1, block_size)[:, start_pos:],
         loss_mask.to(torch.bool).reshape(-1, block_size)[:, start_pos:],
     )
-    metrics["eal_sum"] = eal_sum
-    metrics["eal_total"] = eal_total
+    metrics["argmax_eal_sum"] = eal_sum
+    metrics["argmax_eal_total"] = eal_total
 
     if (
         real_loss_mask is not None

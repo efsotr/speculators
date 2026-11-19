@@ -35,12 +35,12 @@ def compute_real_branch_counts(
     position_sums = scores.sum(dim=0)
     block_total = valid[:, 0].sum().float()
     metrics = {
-        "real_eal_sum": position_sums.sum() + block_total,
-        "real_eal_total": block_total,
+        "real_branch_eal_sum": position_sums.sum() + block_total,
+        "real_branch_eal_total": block_total,
     }
     for offset, pos in enumerate(range(start_pos, block_size)):
-        metrics[f"position_{pos}_real_acc_sum"] = position_sums[offset]
-        metrics[f"position_{pos}_real_acc_total"] = block_total
+        metrics[f"position_{pos}_real_branch_acc_sum"] = position_sums[offset]
+        metrics[f"position_{pos}_real_branch_acc_total"] = block_total
     return metrics
 
 

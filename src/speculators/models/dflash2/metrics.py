@@ -297,8 +297,8 @@ def compute_metrics(
             selector_correct.view(num_blocks, block_size)[:, start_pos:],
             valid_blocks[:, start_pos:],
         )
-        metrics["eal_sum"] = eal_sum
-        metrics["eal_total"] = eal_total
+        metrics["argmax_eal_sum"] = eal_sum
+        metrics["argmax_eal_total"] = eal_total
 
         oracle_alive = torch.ones(
             num_blocks, dtype=torch.bool, device=unary_logits.device
