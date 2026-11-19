@@ -359,6 +359,7 @@ def compound_loss(  # noqa: C901, PLR0917
     start_pos: int = 0,
     tv_loss_fn=tv_loss,
     gamma: float = 4.0,
+    tv_cache: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute a weighted sum of loss terms.
 
@@ -381,6 +382,7 @@ def compound_loss(  # noqa: C901, PLR0917
             block_size=block_size,
             start_pos=start_pos,
             tv_loss_fn=tv_loss_fn,
+            tv_cache=tv_cache,
             ce_weight=loss_config["ce_gt"][1],
             ce_position_weights=dflash_loss_decay(
                 pos_idx.float(), gamma, sample_from_anchor=start_pos == 0
@@ -410,6 +412,8 @@ def compound_loss(  # noqa: C901, PLR0917
             if elementwise_losses is None
             else elementwise_losses[name]
         )
+        if name == "tv" and fn is tv_loss_fn and tv_cache is not None:
+            tv_cache["tv"] = elementwise.detach()
         if reduction is None:
             reduction = _prepare_loss_reduction(
                 elementwise, loss_mask, pos_idx, decay_fn, loss_normalization

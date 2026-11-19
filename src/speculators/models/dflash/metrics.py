@@ -74,10 +74,12 @@ def compute_metrics(  # noqa: C901
 
     trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config))
     elementwise_losses = None
+    accept_rate = None
+    tv_cache = {}
     if trajectory:
         decay_fn = None
     elif per_position_loss_weight in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}:
-        elementwise_losses, weights, _accept_rate = prepare_dpa_dev(
+        elementwise_losses, weights, accept_rate = prepare_dpa_dev(
             logits,
             targets,
             loss_mask,
@@ -101,8 +103,9 @@ def compute_metrics(  # noqa: C901
             targets,
             data_token_ids if dpace_token_source == "data" else None,  # noqa: S105
         )
-        with torch.no_grad():
-            tv = tv_loss(logits, targets) if dpace_dev_accept_prob == "tv" else None
+        if dpace_dev_accept_prob == "tv":
+            with torch.no_grad():
+                accept_rate = 1.0 - tv_loss_fn(logits, targets)
         decay_fn = partial(
             dpace_dev_loss_decay,
             loss_mask=loss_mask,
@@ -111,7 +114,7 @@ def compute_metrics(  # noqa: C901
             q=q,
             p=p,
             accept_prob=dpace_dev_accept_prob,
-            overlap=None if tv is None else 1.0 - tv,
+            overlap=accept_rate,
         )
     elif per_position_loss_weight == "dpace":
         decay_fn = partial(
@@ -139,6 +142,7 @@ def compute_metrics(  # noqa: C901
         tv_loss_fn=tv_loss_fn,
         gamma=gamma,
         data_token_ids=data_token_ids,
+        tv_cache=tv_cache,
     )
 
     pred_ids = torch.argmax(logits, dim=-1)
@@ -180,7 +184,11 @@ def compute_metrics(  # noqa: C901
         and start_pos < block_size
     ):
         with torch.no_grad():
-            accept_rate = 1.0 - tv_loss_fn(logits, targets)
+            if accept_rate is None:
+                tv = tv_cache.get("tv")
+                if tv is None:
+                    tv = tv_loss_fn(logits, targets)
+                accept_rate = 1.0 - tv
         metrics.update(
             compute_real_branch_counts(
                 logits,

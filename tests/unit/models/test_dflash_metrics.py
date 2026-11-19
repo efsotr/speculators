@@ -429,7 +429,42 @@ def test_real_metrics_pool_position_scores_over_blocks(sample_from_anchor):
         torch.testing.assert_close(metrics[key], value)
 
     assert metrics["real_eal_total"].item() == 2
-    assert metrics["real_eal_sum"].item() == pytest.approx(1.8)
+    assert metrics["real_eal_sum"].item() == pytest.approx(3.8)
     for pos, expected in enumerate((1.2, 0.3, 0.3), start=start_pos):
         assert metrics[f"position_{pos}_real_acc_sum"].item() == pytest.approx(expected)
         assert metrics[f"position_{pos}_real_acc_total"].item() == 2
+
+
+@pytest.mark.parametrize("train_with_tv", [False, True])
+def test_real_metrics_use_tv_once_and_produce_no_gradients(train_with_tv):
+    tv_grad_modes = []
+
+    def tracked_tv(logits, targets):
+        tv_grad_modes.append(torch.is_grad_enabled())
+        return tv_loss(logits, targets)
+
+    config = (
+        {"tv": (tracked_tv, 1.0)}
+        if train_with_tv
+        else resolve_loss_config("kl_div", "eager")
+    )
+    logits = torch.randn(1, 4, 2, requires_grad=True)
+    targets = torch.randn_like(logits)
+    ids = torch.zeros(1, 4, dtype=torch.long)
+    mask = torch.ones_like(ids)
+    loss, metrics = _compute_metrics(
+        logits,
+        targets,
+        mask,
+        block_size=4,
+        loss_config=config,
+        tv_loss_fn=tracked_tv,
+        data_token_ids=ids,
+        real_loss_mask=mask,
+    )
+
+    assert tv_grad_modes == [train_with_tv]
+    assert not metrics["real_eal_sum"].requires_grad
+    assert not metrics["position_1_real_acc_sum"].requires_grad
+    loss.backward()
+    assert logits.grad is not None

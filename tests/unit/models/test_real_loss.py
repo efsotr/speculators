@@ -217,4 +217,4 @@ def test_real_model_metrics(kind):
     auxiliary = (auxiliary[:, start:] * weights).sum() / mask.sum()
     torch.testing.assert_close(loss, 0.8 * branch + 0.2 * ce + auxiliary)
     real_eal = metrics["real_eal_sum"] / metrics["real_eal_total"]
-    torch.testing.assert_close(real_eal, (1.0 - branch) * (4 - start))
+    torch.testing.assert_close(real_eal, 1.0 + (1.0 - branch) * (4 - start))

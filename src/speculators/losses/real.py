@@ -5,6 +5,7 @@ import torch
 TRAJECTORY_LOSSES = {"REAL"}
 
 
+@torch.compile(dynamic=True)
 def observed_log_probability(logits, ids):
     return logits.gather(-1, ids.unsqueeze(-1)).squeeze(-1).float() - (
         logits.float().logsumexp(-1)
@@ -43,6 +44,7 @@ def trajectory_loss(
     tv_loss_fn,
     ce_weight,
     ce_position_weights=None,
+    tv_cache=None,
 ):
     """Compute trajectory losses over the valid prefix of each block."""
     if token_ids is None or token_ids.shape != logits.shape[:-1]:
@@ -64,7 +66,10 @@ def trajectory_loss(
     )
     log_b = torch.where(valid, log_ratio.clamp(max=0.0), 0.0)
     inclusive = log_b.cumsum(-1)
-    overlap = 1.0 - tv_loss_fn(logits, targets).reshape(-1, block_size)[:, start_pos:]
+    tv = tv_loss_fn(logits, targets)
+    if tv_cache is not None:
+        tv_cache["tv"] = tv.detach()
+    overlap = 1.0 - tv.reshape(-1, block_size)[:, start_pos:]
     branch = real_branch_scores(inclusive, overlap, valid)
     denominator = valid.sum().clamp_min(1)
     objective = torch.where(valid, 1.0 - branch, 0.0).sum() / denominator
