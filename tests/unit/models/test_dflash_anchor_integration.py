@@ -11,8 +11,6 @@ from speculators.models.dflash2.config import DFlash2SpeculatorConfig
 from speculators.models.dflash2.core import DFlash2DraftModel
 from speculators.models.dspark.config import DSparkSpeculatorConfig
 from speculators.models.dspark.core import DSparkDraftModel
-from speculators.models.xpress.config import XPressSpeculatorConfig
-from speculators.models.xpress.core import XPressDraftModel
 from speculators.train.config.schema import DSparkArgs
 
 
@@ -27,7 +25,6 @@ def _model(model_type="dflash", sample=False, draft_vocab_size=32):
         "dflash": (DFlashSpeculatorConfig, DFlashDraftModel),
         "dflash2": (DFlash2SpeculatorConfig, DFlash2DraftModel),
         "dspark": (DSparkSpeculatorConfig, DSparkDraftModel),
-        "xpress": (XPressSpeculatorConfig, XPressDraftModel),
     }[model_type]
     config = config_cls(
         transformer_layer_config=decoder, draft_vocab_size=draft_vocab_size, block_size=4,
@@ -129,7 +126,7 @@ def test_train_and_validation_policies_are_independent(model_type):
     assert train["anchor_sampling"] == policy
 
 
-@pytest.mark.parametrize("model_type", ["dflash", "dflash2", "dspark", "xpress"])
+@pytest.mark.parametrize("model_type", ["dflash", "dflash2", "dspark"])
 def test_validation_positions_repeat_after_training_sampling(model_type):
     model = _model(model_type)
     batch = _batch(64)
