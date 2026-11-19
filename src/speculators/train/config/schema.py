@@ -440,7 +440,7 @@ class LossArgs(_Group):
         description="Loss function specification. A name "
         "(kl_div, kl_div2, rkl, jsd, ce, ce_gt, tv, "
         "nla, lk_hybrid, REAL, raw_path, overlap_prod) or a JSON dict for a weighted combination, "
-        'e.g. \'{"ce": 0.1, "tv": 0.9}\'. REAL pairs with ce_gt using weights that sum '
+        'e.g. \'{"ce": 0.1, "tv": 0.9}\'. REAL pairs with ce_gt or ce using weights that sum '
         'to 1. (default: "ce" for dflash, \'{"ce": 0.1, "tv": 0.9}\' for '
         'xpress, "kl_div" otherwise).',
     )

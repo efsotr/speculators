@@ -337,16 +337,16 @@ def resolve_loss_config(  # noqa: C901
 
 
 def _validate_real_weights(config: LossConfig, parsed: dict) -> None:
-    if config.keys() != {"REAL", "ce_gt"}:
-        raise ValueError("REAL requires a loss config with exactly REAL and ce_gt")
+    if config.keys() not in ({"REAL", "ce_gt"}, {"REAL", "ce"}):
+        raise ValueError("REAL requires exactly one auxiliary loss, ce_gt or ce")
     real_weight = config["REAL"][1]
-    ce_weight = config["ce_gt"][1]
+    ce_weight = config["ce" if "ce" in config else "ce_gt"][1]
     if any(isinstance(value, bool) for value in parsed.values()) or not (
         0.0 <= real_weight <= 1.0
         and 0.0 <= ce_weight <= 1.0
         and real_weight + ce_weight == 1.0
     ):
-        raise ValueError("REAL and ce_gt weights must be in [0, 1] and sum to 1")
+        raise ValueError("REAL and auxiliary CE weights must be in [0, 1] and sum to 1")
 
 
 
@@ -396,6 +396,7 @@ def compound_loss(  # noqa: C901, PLR0917
         if block_size is None:
             raise ValueError("Trajectory losses require a block size")
         raw_path = "raw_path" in loss_config
+        ce_name = "ce" if "ce" in loss_config else "ce_gt"
         return trajectory_loss(
             logits,
             targets,
@@ -406,7 +407,8 @@ def compound_loss(  # noqa: C901, PLR0917
             tv_loss_fn=tv_loss_fn,
             tv_cache=tv_cache,
             raw_path=raw_path,
-            ce_weight=0.0 if raw_path else loss_config["ce_gt"][1],
+            ce_weight=0.0 if raw_path else loss_config[ce_name][1],
+            ce_name=ce_name,
             ce_position_weights=(
                 dflash_loss_decay(
                     pos_idx.float(), gamma, sample_from_anchor=start_pos == 0

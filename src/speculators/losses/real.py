@@ -44,6 +44,7 @@ def trajectory_loss(
     tv_loss_fn,
     raw_path,
     ce_weight,
+    ce_name="ce_gt",
     ce_position_weights=None,
     tv_cache=None,
 ):
@@ -86,11 +87,16 @@ def trajectory_loss(
     branch = real_branch_scores(inclusive, overlap, valid)
     denominator = valid.sum().clamp_min(1)
     objective = torch.where(valid, 1.0 - branch, 0.0).sum() / denominator
+    if ce_name == "ce":
+        vocab = logits.shape[-1]
+        q = logits.reshape(-1, block_size, vocab)[:, start_pos:]
+        p = targets.reshape(-1, block_size, vocab)[:, start_pos:]
+        log_q = observed_log_probability(q, p.argmax(dim=-1))
     ce = torch.where(valid, -log_q, 0.0)
     if ce_position_weights is not None:
         ce = ce * ce_position_weights.reshape(-1, block_size)[:, start_pos:]
     ce = ce.sum() / denominator
     return (1.0 - ce_weight) * objective + ce_weight * ce, {
         "real_branch_loss": objective.detach(),
-        "ce_gt_loss": ce.detach(),
+        f"{ce_name}_loss": ce.detach(),
     }
