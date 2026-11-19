@@ -249,6 +249,7 @@ _FUSED_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "REAL": trajectory_loss,
     "raw_path": trajectory_loss,
     "tv": tv_loss,
+    "overlap_prod": tv_loss,
     "nla": neg_log_acceptance_loss,
     "lk_hybrid": lk_hybrid_loss,
 }
@@ -264,6 +265,7 @@ _EAGER_LOSS_FN_MAP: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tenso
     "REAL": trajectory_loss,
     "raw_path": trajectory_loss,
     "tv": eager.tv_loss,
+    "overlap_prod": eager.tv_loss,
     "nla": eager.neg_log_acceptance_loss,
     "lk_hybrid": eager.lk_hybrid_loss,
 }
@@ -318,8 +320,8 @@ def resolve_loss_config(  # noqa: C901
                 f"Unknown loss function '{name}' in loss config. "
                 f"Choose from: {sorted(loss_fn_map)}"
             )
-        if name == "raw_path":
-            raise ValueError("raw_path must be configured as a standalone loss name")
+        if name in {"raw_path", "overlap_prod"}:
+            raise ValueError(f"{name} must be configured as a standalone loss name")
         if not isinstance(weight, (int, float)):
             raise ValueError(
                 f"Loss weight for '{name}' must be a number, "
@@ -375,6 +377,21 @@ def compound_loss(  # noqa: C901, PLR0917
     keyed as ``"{name}_loss"``.  When the config contains a single term the
     dict is empty (the overall loss already captures it).
     """
+    if "overlap_prod" in loss_config:
+        if loss_config.keys() != {"overlap_prod"} or loss_config["overlap_prod"][1] != 1.0:
+            raise ValueError("overlap_prod requires a standalone unweighted loss")
+        if loss_normalization != "token_count" or block_size is None:
+            raise ValueError("overlap_prod requires token_count normalization and a block size")
+        tv_fn, _ = loss_config["overlap_prod"]
+        tv = tv_fn(logits, targets)
+        if tv_cache is not None:
+            tv_cache["tv"] = tv.detach()
+        valid = loss_mask.reshape(-1, block_size)[:, start_pos:].bool()
+        acceptance = 1.0 - tv.float().reshape(-1, block_size)[:, start_pos:]
+        prefixes = torch.where(valid, acceptance, 0.0).cumprod(dim=-1)
+        # Minimize negative expected accepted prefix length.
+        return -prefixes.sum() / valid.sum().clamp_min(1), {}
+
     if TRAJECTORY_LOSSES.intersection(loss_config):
         if block_size is None:
             raise ValueError("Trajectory losses require a block size")
