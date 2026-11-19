@@ -196,8 +196,8 @@ def test_dflash2_kl_and_recomputed_selector_probabilities(mode):
         per_position_loss_weight="dpace_dev",
         dpace_alpha=0.5,
         dpace_dev_accept_prob=mode,
-        dpace_candidate_ids=unary.detach().topk(3, dim=-1).indices,
-        dpace_candidate_logits=selector,
+        serving_candidate_ids=unary.detach().topk(3, dim=-1).indices,
+        serving_candidate_logits=selector,
     )
     q, p = dpace_dev_token_probs(unary.detach(), teacher)
     if mode == "tv":
@@ -331,8 +331,8 @@ def _combined_loss(  # noqa: PLR0917
         tv_loss_fn=tv_loss,
         per_position_loss_weight="dpace_dev",
         dpace_dev_accept_prob=mode,
-        dpace_candidate_ids=unary.detach().topk(3, dim=-1).indices,
-        dpace_candidate_logits=selector,
+        serving_candidate_ids=unary.detach().topk(3, dim=-1).indices,
+        serving_candidate_logits=selector,
         dpace_token_source=source,
         data_token_ids=(teacher.argmax(-1) + 1) % teacher.shape[-1],
     )
@@ -420,8 +420,8 @@ def test_selector_original_candidates_and_selected_token(source, mode):
             dpace_dev_accept_prob=mode,
             dpace_token_source=source,
             data_token_ids=data_ids,
-            dpace_candidate_ids=original_ids,
-            dpace_candidate_logits=o,
+            serving_candidate_ids=original_ids,
+            serving_candidate_logits=o,
         )[0]
 
     ids = data_ids if source == "data" else teacher.argmax(-1)

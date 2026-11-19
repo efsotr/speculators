@@ -442,6 +442,8 @@ def test_selector_loss_alpha_zero_preserves_unary_objective():
         loss_config=loss_config,
         tv_loss_fn=tv_loss_fn,
         selector_loss_alpha=0.0,
+        serving_candidate_ids=candidate_ids,
+        serving_candidate_logits=candidate_logits,
     )
 
     torch.testing.assert_close(actual, expected)
@@ -454,6 +456,8 @@ def test_selector_loss_alpha_zero_preserves_unary_objective():
     assert unary_metrics["greedy_eal_sum"].item() == 1.0
     assert metrics["position_1_greedy_acc_sum"].item() == 1.0
     assert unary_metrics["position_1_greedy_acc_sum"].item() == 0.0
+    assert metrics["position_3_greedy_independ_acc_sum"].item() == 1.0
+    assert metrics["position_3_greedy_acc_sum"].item() == 0.0
     torch.testing.assert_close(
         metrics["accept_len_sum"], unary_metrics["accept_len_sum"]
     )

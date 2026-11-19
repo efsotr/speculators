@@ -28,18 +28,34 @@ def compute_real_branch_counts(
         block_size=block_size,
         start_pos=start_pos,
     )
-    inclusive = torch.where(valid, log_ratio.clamp(max=0.0), 0.0).cumsum(-1)
-    scores = real_branch_scores(
-        inclusive, overlap.reshape(-1, block_size)[:, start_pos:], valid
+    return compute_prob_prefix_counts(
+        log_ratio,
+        overlap.reshape(-1, block_size)[:, start_pos:],
+        valid,
+        start_pos=start_pos,
     )
+
+
+@torch.no_grad()
+def compute_prob_prefix_counts(
+    log_ratio: torch.Tensor,
+    overlap: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    start_pos: int,
+) -> dict[str, torch.Tensor]:
+    """Count probability-weighted prefix acceptance from block-shaped inputs."""
+    inclusive = torch.where(valid, log_ratio.clamp(max=0.0), 0.0).cumsum(-1)
+    scores = real_branch_scores(inclusive, overlap, valid)
     position_sums = scores.sum(dim=0)
     block_total = valid[:, 0].sum().float()
     metrics = {
         "prob_eal_sum": position_sums.sum() + block_total,
         "prob_eal_total": block_total,
     }
-    for offset, pos in enumerate(range(start_pos, block_size)):
-        metrics[f"position_{pos}_prob_acc_sum"] = position_sums[offset]
+    for offset, position_sum in enumerate(position_sums.unbind()):
+        pos = start_pos + offset
+        metrics[f"position_{pos}_prob_acc_sum"] = position_sum
         metrics[f"position_{pos}_prob_acc_total"] = block_total
     return metrics
 

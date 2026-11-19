@@ -202,12 +202,10 @@ class DFlash2DraftModel(DFlashDraftModel):
             training_candidate_ids,
         )
 
-        dpace_candidate_logits = None
-        if per_position_loss_weight == "dpace_dev":
-            with torch.no_grad():
-                dpace_candidate_logits = self.candidate_selector.score_candidates(
-                    unary_logits, hidden, predecessor_ids.reshape(1, -1), candidate_ids
-                )
+        with torch.no_grad():
+            serving_candidate_logits = self.candidate_selector.score_candidates(
+                unary_logits, hidden, predecessor_ids.reshape(1, -1), candidate_ids
+            )
 
         dpa_dev_weights = {}
         trajectory = bool(TRAJECTORY_LOSSES.intersection(loss_config or {}))
@@ -229,8 +227,8 @@ class DFlash2DraftModel(DFlashDraftModel):
             loss_mask=aligned_loss_mask,
             block_size=self.block_size,
             top_k=self.candidate_selector.top_k,
-            dpace_candidate_ids=candidate_ids,
-            dpace_candidate_logits=dpace_candidate_logits,
+            serving_candidate_ids=candidate_ids,
+            serving_candidate_logits=serving_candidate_logits,
             sample_from_anchor=self.config.sample_from_anchor,
             loss_config=loss_config or _DEFAULT_LOSS_CONFIG,
             tv_loss_fn=tv_loss_fn,

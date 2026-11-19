@@ -227,6 +227,8 @@ def test_dflash2_selector_uses_unary_weight(signal):
         data_token_ids=ids,
         dpa_dev_prefix_only=signal in {"p_draft", "q_draft"},
         dpa_dev_weights=shared,
+        serving_candidate_ids=q.detach().topk(3, dim=-1).indices,
+        serving_candidate_logits=selector,
     )
     unary, _ = compute_metrics(
         q,

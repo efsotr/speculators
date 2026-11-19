@@ -1,7 +1,7 @@
 """Runtime-aligned selector loss and metrics for DFlash2.
 
-``eal`` follows the realized greedy selector path. ``accept_len`` remains the
-analytical TV-overlap estimate over the unary logits.
+Greedy and probabilistic prefix metrics use the teacher-forced selector path.
+``accept_len`` reports the analytical TV-overlap estimate over unary logits.
 """
 
 from collections.abc import Callable
@@ -20,7 +20,10 @@ from speculators.losses import (
     tv_loss,
 )
 from speculators.models.dspark.metrics import compute_metrics as compute_unary_metrics
-from speculators.models.metrics import compute_greedy_prefix_counts
+from speculators.models.metrics import (
+    compute_greedy_prefix_counts,
+    compute_prob_prefix_counts,
+)
 
 __all__ = [
     "compute_metrics",
@@ -154,6 +157,8 @@ def compute_metrics(
     sample_from_anchor: bool = False,
     *,
     loss_config: LossConfig,
+    serving_candidate_ids: torch.Tensor,
+    serving_candidate_logits: torch.Tensor,
     tv_loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = tv_loss,
     gamma: float = 4.0,
     selector_loss_alpha: float = 1.0,
@@ -166,8 +171,6 @@ def compute_metrics(
     dpa_dev_prefix_only: bool = False,
     dpace_token_source: str = "teacher_argmax",  # noqa: S107
     data_token_ids: torch.Tensor | None = None,
-    dpace_candidate_ids: torch.Tensor | None = None,
-    dpace_candidate_logits: torch.Tensor | None = None,
     dpa_dev_weights: dict | None = None,
     real_loss_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -191,7 +194,6 @@ def compute_metrics(
         shared_weights=shared_weights,
         dpace_token_source=dpace_token_source,
         data_token_ids=data_token_ids,
-        real_loss_mask=real_loss_mask,
         loss_normalization=loss_normalization,
         per_position_loss_weight=per_position_loss_weight,
         dpace_alpha=dpace_alpha,
@@ -207,20 +209,16 @@ def compute_metrics(
                 data_token_ids if dpace_token_source == "data" else targets.argmax(-1)  # noqa: S105
             )
             ids = token_ids.unsqueeze(-1)
-            if dpace_candidate_ids is None or dpace_candidate_logits is None:
-                raise ValueError(
-                    "dpace_dev selector requires original candidate IDs and logits"
-                )
+            q_candidates = serving_candidate_logits.float().softmax(-1)
             if dpace_dev_accept_prob == "tv":
                 # q has zero mass outside the original serving candidates.
-                q_candidates = dpace_candidate_logits.float().softmax(-1)
                 p_candidates = (
-                    targets.gather(-1, dpace_candidate_ids).float()
+                    targets.gather(-1, serving_candidate_ids).float()
                     - targets.float().logsumexp(-1, keepdim=True)
                 ).exp()
                 selector_overlap = torch.minimum(q_candidates, p_candidates).sum(-1)
-            matches = dpace_candidate_ids.eq(ids)
-            draft_probs = (dpace_candidate_logits.float().softmax(-1) * matches).sum(-1)
+            matches = serving_candidate_ids.eq(ids)
+            draft_probs = (q_candidates * matches).sum(-1)
             target_probs = (
                 targets.gather(-1, ids).squeeze(-1).float()
                 - targets.float().logsumexp(dim=-1)
@@ -274,8 +272,8 @@ def compute_metrics(
         ).sum()
         metrics[f"unary_candidate_target_mass_at_{top_k}_total"] = valid_total.clone()
 
-        teacher_forced_ids = training_candidate_ids.gather(
-            -1, candidate_logits.detach().argmax(dim=-1, keepdim=True)
+        teacher_forced_ids = serving_candidate_ids.gather(
+            -1, serving_candidate_logits.argmax(dim=-1, keepdim=True)
         ).squeeze(-1)
         serving_valid = valid_float * contains_target.to(valid_float.dtype)
         serving_total = serving_valid.sum()
@@ -288,18 +286,66 @@ def compute_metrics(
         contains_target_blocks = contains_target.view(num_blocks, block_size)
         valid_blocks = valid.view(num_blocks, block_size)
 
-        # Teacher-forced predecessor tokens are exact while the greedy path is
-        # alive. Gate on the original unary candidate set because training may
-        # inject a missing target that would not be available during serving.
         start_pos = 0 if sample_from_anchor else 1
-        selector_correct = teacher_forced_ids.eq(target_ids) & contains_target
+        selector_correct = teacher_forced_ids.eq(target_ids)
+        correct_blocks = selector_correct.view(num_blocks, block_size)[:, start_pos:]
+        draft_valid = valid_blocks[:, start_pos:]
         metrics.update(
             compute_greedy_prefix_counts(
-                selector_correct.view(num_blocks, block_size)[:, start_pos:],
-                valid_blocks[:, start_pos:],
+                correct_blocks,
+                draft_valid,
                 start_pos=start_pos,
             )
         )
+
+        independent_sums = (correct_blocks & draft_valid).sum(dim=0).float()
+        independent_totals = draft_valid.sum(dim=0).float()
+        metrics["full_acc_sum"] = independent_sums.sum()
+        metrics["full_acc_total"] = independent_totals.sum()
+        for offset, pos in enumerate(range(start_pos, block_size)):
+            metrics[f"position_{pos}_greedy_independ_acc_sum"] = independent_sums[offset]
+            metrics[f"position_{pos}_greedy_independ_acc_total"] = (
+                independent_totals[offset]
+            )
+
+        if (
+            real_loss_mask is not None
+            and data_token_ids is not None
+            and start_pos < block_size
+        ):
+            prefix_valid = (
+                real_loss_mask.reshape(num_blocks, block_size)[:, start_pos:]
+                .bool()
+                .cumprod(-1)
+                .bool()
+            )
+            token_ids = data_token_ids.reshape(num_blocks, block_size)[:, start_pos:]
+            token_ids = torch.where(prefix_valid, token_ids, 0).unsqueeze(-1)
+            candidate_ids = serving_candidate_ids.reshape(num_blocks, block_size, top_k)
+            candidate_ids = candidate_ids[:, start_pos:]
+            selector_logits = serving_candidate_logits.reshape(
+                num_blocks, block_size, top_k
+            )
+            log_q = selector_logits[:, start_pos:].float().log_softmax(-1)
+            # Serving assigns zero probability outside the original top-k.
+            log_q_y = log_q.masked_fill(candidate_ids.ne(token_ids), -torch.inf).amax(-1)
+
+            target_logits = targets.reshape(num_blocks, block_size, targets.shape[-1])
+            target_logits = target_logits[:, start_pos:]
+            log_p_normalizer = target_logits.float().logsumexp(-1, keepdim=True)
+            log_p_y = target_logits.gather(-1, token_ids).float() - log_p_normalizer
+            p_candidates = (
+                target_logits.gather(-1, candidate_ids).float() - log_p_normalizer
+            ).exp()
+            overlap = torch.minimum(log_q.exp(), p_candidates).sum(-1)
+            metrics.update(
+                compute_prob_prefix_counts(
+                    log_q_y - log_p_y.squeeze(-1),
+                    overlap,
+                    prefix_valid,
+                    start_pos=start_pos,
+                )
+            )
 
         oracle_alive = torch.ones(
             num_blocks, dtype=torch.bool, device=unary_logits.device
