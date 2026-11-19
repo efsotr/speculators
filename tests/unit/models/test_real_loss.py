@@ -216,5 +216,5 @@ def test_real_model_metrics(kind):
     branch, ce = reference_loss(logits, targets, token_ids, mask, start, gamma)
     auxiliary = (auxiliary[:, start:] * weights).sum() / mask.sum()
     torch.testing.assert_close(loss, 0.8 * branch + 0.2 * ce + auxiliary)
-    real_eal = metrics["real_branch_eal_sum"] / metrics["real_branch_eal_total"]
+    real_eal = metrics["prob_eal_sum"] / metrics["prob_eal_total"]
     torch.testing.assert_close(real_eal, 1.0 + (1.0 - branch) * (4 - start))

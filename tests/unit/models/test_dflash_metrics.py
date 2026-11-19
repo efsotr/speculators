@@ -297,10 +297,10 @@ class TestComputeMetrics:
         targets = _ids_to_logits(torch.randint(0, V, (B, T)), V)
         loss_mask = torch.ones(B, T)
         _, metrics = compute_metrics(logits, targets, loss_mask, block_size=4)
-        assert "position_0_argmax_acc_sum" not in metrics
+        assert "position_0_greedy_independ_acc_sum" not in metrics
         for i in range(1, 4):
-            assert f"position_{i}_argmax_acc_sum" in metrics
-            assert f"position_{i}_argmax_acc_total" in metrics
+            assert f"position_{i}_greedy_independ_acc_sum" in metrics
+            assert f"position_{i}_greedy_independ_acc_total" in metrics
 
     def test_loss_matches_loss_function(self):
         B, T, V = 1, 8, 10
@@ -337,10 +337,10 @@ class TestComputeMetrics:
         assert torch.isclose(metrics["full_acc_total"], expected_total[1:].sum())
         for i in range(1, 4):
             assert torch.isclose(
-                metrics[f"position_{i}_argmax_acc_sum"], expected_correct[i]
+                metrics[f"position_{i}_greedy_independ_acc_sum"], expected_correct[i]
             )
             assert torch.isclose(
-                metrics[f"position_{i}_argmax_acc_total"], expected_total[i]
+                metrics[f"position_{i}_greedy_independ_acc_total"], expected_total[i]
             )
 
 
@@ -350,7 +350,7 @@ class TestExpectedAcceptedLength:
     # Four blocks of block_size=4; with sample_from_anchor=False the anchor is
     # the bonus token, leaving three draft slots whose accepted runs are 3/2/1/0.
     _TARGET_IDS = torch.zeros(1, 16, dtype=torch.long)
-    _PRED_IDS = torch.tensor([[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1]])
+    _PRED_IDS = torch.tensor([[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0]])
 
     def _metrics(self, block_slice: slice):
         ids = self._PRED_IDS[:, block_slice]
@@ -370,26 +370,30 @@ class TestExpectedAcceptedLength:
         """
         whole = self._metrics(slice(None))
         # runs 3, 2, 1, 0 -> mean 1.5, plus one bonus token per block
-        assert whole["argmax_eal_sum"].item() == pytest.approx(10.0)
-        assert whole["argmax_eal_total"].item() == pytest.approx(4.0)
+        assert whole["greedy_eal_sum"].item() == pytest.approx(10.0)
+        assert whole["greedy_eal_total"].item() == pytest.approx(4.0)
+        for pos, accepted in enumerate((3, 2, 1), start=1):
+            assert whole[f"position_{pos}_greedy_acc_sum"].item() == accepted
+            assert whole[f"position_{pos}_greedy_acc_total"].item() == 4
+        assert whole["position_3_greedy_independ_acc_sum"].item() == 2
 
         halves = [self._metrics(slice(0, 8)), self._metrics(slice(8, 16))]
         accumulated = {
             key: sum(m[key] for m in halves)
-            for key in ("argmax_eal_sum", "argmax_eal_total")
+            for key in ("greedy_eal_sum", "greedy_eal_total")
         }
-        assert accumulated["argmax_eal_sum"].item() == pytest.approx(
-            whole["argmax_eal_sum"].item()
+        assert accumulated["greedy_eal_sum"].item() == pytest.approx(
+            whole["greedy_eal_sum"].item()
         )
-        assert accumulated["argmax_eal_total"].item() == pytest.approx(
-            whole["argmax_eal_total"].item()
+        assert accumulated["greedy_eal_total"].item() == pytest.approx(
+            whole["greedy_eal_total"].item()
         )
 
-        eal = accumulated["argmax_eal_sum"] / accumulated["argmax_eal_total"]
+        eal = accumulated["greedy_eal_sum"] / accumulated["greedy_eal_total"]
         assert eal.item() == pytest.approx(2.5)
-        # The per-position marginals are .75/.50/.25, whose running product sums
-        # to 1.21875 (2.21875 with the bonus token) -- a different number.
-        assert eal.item() != pytest.approx(2.21875)
+        # The per-position marginals are .75/.50/.50, whose running product sums
+        # to 1.3125 (2.3125 with the bonus token) -- a different number.
+        assert eal.item() != pytest.approx(2.3125)
 
     def test_eal_skips_fully_masked_blocks(self):
         ids = torch.zeros(1, 8, dtype=torch.long)
@@ -400,8 +404,8 @@ class TestExpectedAcceptedLength:
             loss_mask,
             block_size=4,
         )
-        assert metrics["argmax_eal_total"].item() == pytest.approx(1.0)
-        assert metrics["argmax_eal_sum"].item() == pytest.approx(4.0)
+        assert metrics["greedy_eal_total"].item() == pytest.approx(1.0)
+        assert metrics["greedy_eal_sum"].item() == pytest.approx(4.0)
 
 
 @pytest.mark.parametrize("sample_from_anchor", [False, True])
@@ -435,13 +439,13 @@ def test_real_metrics_pool_position_scores_over_blocks(sample_from_anchor):
     for key, value in original_metrics.items():
         torch.testing.assert_close(metrics[key], value)
 
-    assert metrics["real_branch_eal_total"].item() == 2
-    assert metrics["real_branch_eal_sum"].item() == pytest.approx(3.8)
+    assert metrics["prob_eal_total"].item() == 2
+    assert metrics["prob_eal_sum"].item() == pytest.approx(3.8)
     for pos, expected in enumerate((1.2, 0.3, 0.3), start=start_pos):
-        assert metrics[f"position_{pos}_real_branch_acc_sum"].item() == pytest.approx(
+        assert metrics[f"position_{pos}_prob_acc_sum"].item() == pytest.approx(
             expected
         )
-        assert metrics[f"position_{pos}_real_branch_acc_total"].item() == 2
+        assert metrics[f"position_{pos}_prob_acc_total"].item() == 2
 
 
 @pytest.mark.parametrize("train_with_tv", [False, True])
@@ -473,7 +477,7 @@ def test_real_metrics_use_tv_once_and_produce_no_gradients(train_with_tv):
     )
 
     assert tv_grad_modes == [train_with_tv]
-    assert not metrics["real_branch_eal_sum"].requires_grad
-    assert not metrics["position_1_real_branch_acc_sum"].requires_grad
+    assert not metrics["prob_eal_sum"].requires_grad
+    assert not metrics["position_1_prob_acc_sum"].requires_grad
     loss.backward()
     assert logits.grad is not None

@@ -18,8 +18,8 @@ from speculators.losses import (
 from speculators.losses.dpa_dev import prepare_dpa_dev
 from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.models.metrics import (
-    compute_accepted_length_counts,
     compute_accuracy_multi_step,
+    compute_greedy_prefix_counts,
     compute_real_branch_counts,
 )
 
@@ -62,8 +62,9 @@ def compute_metrics(  # noqa: C901
         Tuple of (loss, metrics_dict) where metrics_dict contains:
             - loss: Scalar loss value
             - full_acc: Overall accuracy
-            - position_{i}_argmax_acc: Argmax agreement at position i within blocks
-            - argmax_eal: Expected Accepted Length, the mean per-block accepted run
+            - position_{i}_greedy_independ_acc: Argmax agreement at position i
+            - position_{i}_greedy_acc: Fraction of blocks accepted through position i
+            - greedy_eal: Expected Accepted Length, the mean per-block accepted run
               plus the verifier's bonus token (headline metric)
     """
     if loss_config is None:
@@ -166,17 +167,18 @@ def compute_metrics(  # noqa: C901
     metrics["full_acc_total"] = total_per_pos[start_pos:].sum()
 
     for pos in range(start_pos, block_size):
-        metrics[f"position_{pos}_argmax_acc_sum"] = correct_per_pos[pos]
-        metrics[f"position_{pos}_argmax_acc_total"] = total_per_pos[pos]
+        metrics[f"position_{pos}_greedy_independ_acc_sum"] = correct_per_pos[pos]
+        metrics[f"position_{pos}_greedy_independ_acc_total"] = total_per_pos[pos]
 
     # Counted per block so the accepted run is formed before any averaging; the
     # sum/total pair then pools across batches and ranks like every other metric.
-    eal_sum, eal_total = compute_accepted_length_counts(
-        (pred_ids == target_ids).reshape(-1, block_size)[:, start_pos:],
-        loss_mask.to(torch.bool).reshape(-1, block_size)[:, start_pos:],
+    metrics.update(
+        compute_greedy_prefix_counts(
+            (pred_ids == target_ids).reshape(-1, block_size)[:, start_pos:],
+            loss_mask.to(torch.bool).reshape(-1, block_size)[:, start_pos:],
+            start_pos=start_pos,
+        )
     )
-    metrics["argmax_eal_sum"] = eal_sum
-    metrics["argmax_eal_total"] = eal_total
 
     if (
         real_loss_mask is not None

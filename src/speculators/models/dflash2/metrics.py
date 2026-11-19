@@ -20,7 +20,7 @@ from speculators.losses import (
     tv_loss,
 )
 from speculators.models.dspark.metrics import compute_metrics as compute_unary_metrics
-from speculators.models.metrics import compute_accepted_length_counts
+from speculators.models.metrics import compute_greedy_prefix_counts
 
 __all__ = [
     "compute_metrics",
@@ -293,12 +293,13 @@ def compute_metrics(
         # inject a missing target that would not be available during serving.
         start_pos = 0 if sample_from_anchor else 1
         selector_correct = teacher_forced_ids.eq(target_ids) & contains_target
-        eal_sum, eal_total = compute_accepted_length_counts(
-            selector_correct.view(num_blocks, block_size)[:, start_pos:],
-            valid_blocks[:, start_pos:],
+        metrics.update(
+            compute_greedy_prefix_counts(
+                selector_correct.view(num_blocks, block_size)[:, start_pos:],
+                valid_blocks[:, start_pos:],
+                start_pos=start_pos,
+            )
         )
-        metrics["argmax_eal_sum"] = eal_sum
-        metrics["argmax_eal_total"] = eal_total
 
         oracle_alive = torch.ones(
             num_blocks, dtype=torch.bool, device=unary_logits.device

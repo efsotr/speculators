@@ -31,8 +31,8 @@ from speculators.losses import (
 from speculators.losses.dpa_dev import prepare_dpa_dev
 from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.models.metrics import (
-    compute_accepted_length_counts,
     compute_accuracy_multi_step,
+    compute_greedy_prefix_counts,
     compute_real_branch_counts,
 )
 
@@ -268,17 +268,18 @@ def compute_metrics(  # noqa: C901
     metrics["full_acc_sum"] = correct_per_pos[start_pos:].sum()
     metrics["full_acc_total"] = total_per_pos[start_pos:].sum()
     for pos in range(start_pos, block_size):
-        metrics[f"position_{pos}_argmax_acc_sum"] = correct_per_pos[pos]
-        metrics[f"position_{pos}_argmax_acc_total"] = total_per_pos[pos]
+        metrics[f"position_{pos}_greedy_independ_acc_sum"] = correct_per_pos[pos]
+        metrics[f"position_{pos}_greedy_independ_acc_total"] = total_per_pos[pos]
 
     # Greedy counterpart to accept_len, on the same per-block/bonus-token
     # convention, so DFlash-family runs compare on one number.
-    eal_sum, eal_total = compute_accepted_length_counts(
-        (pred_ids == target_ids).reshape(num_blocks, block_size)[:, start_pos:],
-        draft_mask.to(torch.bool),
+    metrics.update(
+        compute_greedy_prefix_counts(
+            (pred_ids == target_ids).reshape(num_blocks, block_size)[:, start_pos:],
+            draft_mask.to(torch.bool),
+            start_pos=start_pos,
+        )
     )
-    metrics["argmax_eal_sum"] = eal_sum
-    metrics["argmax_eal_total"] = eal_total
 
     if (
         real_loss_mask is not None

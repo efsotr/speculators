@@ -35,40 +35,35 @@ def compute_real_branch_counts(
     position_sums = scores.sum(dim=0)
     block_total = valid[:, 0].sum().float()
     metrics = {
-        "real_branch_eal_sum": position_sums.sum() + block_total,
-        "real_branch_eal_total": block_total,
+        "prob_eal_sum": position_sums.sum() + block_total,
+        "prob_eal_total": block_total,
     }
     for offset, pos in enumerate(range(start_pos, block_size)):
-        metrics[f"position_{pos}_real_branch_acc_sum"] = position_sums[offset]
-        metrics[f"position_{pos}_real_branch_acc_total"] = block_total
+        metrics[f"position_{pos}_prob_acc_sum"] = position_sums[offset]
+        metrics[f"position_{pos}_prob_acc_total"] = block_total
     return metrics
 
 
 @torch.no_grad()
-def compute_accepted_length_counts(
+def compute_greedy_prefix_counts(
     correct: torch.Tensor,  # shape: [num_blocks, num_draft_slots]
     valid: torch.Tensor,  # shape: [num_blocks, num_draft_slots]
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Count accepted length per speculative block as raw sum/total counts.
-
-    A block is accepted up to its first wrong draft slot, so its length is the
-    leading run of correct slots plus the verifier's always-emitted bonus token
-    (vLLM's convention). Forming the run inside the block preserves the
-    correlation between slots; a product of per-slot marginals discards it and
-    understates the result.
-
-    Args:
-        correct: Whether each draft slot matched the target.
-        valid: Whether each draft slot is trained on (block-shaped loss mask).
-
-    Returns:
-        Tuple of (accepted_length_sum, valid_block_total) as raw counts suitable
-        for distributed reduction before computing the ratio.
-    """
+    *,
+    start_pos: int,
+) -> dict[str, torch.Tensor]:
+    """Count accepted prefixes and EAL, including one bonus token per valid block."""
     accepted = torch.logical_and(correct, valid).to(torch.float32)
-    per_block_len = accepted.cumprod(dim=-1).sum(dim=-1) + 1.0
-    block_valid = valid.any(dim=-1).to(torch.float32)
-    return (per_block_len * block_valid).sum(), block_valid.sum()
+    position_sums = accepted.cumprod(dim=-1).sum(dim=0)
+    block_total = valid.any(dim=-1).sum().float()
+    metrics = {
+        "greedy_eal_sum": position_sums.sum() + block_total,
+        "greedy_eal_total": block_total,
+    }
+    for offset, position_sum in enumerate(position_sums.unbind()):
+        pos = start_pos + offset
+        metrics[f"position_{pos}_greedy_acc_sum"] = position_sum
+        metrics[f"position_{pos}_greedy_acc_total"] = block_total
+    return metrics
 
 
 def compute_accuracy_single_step(

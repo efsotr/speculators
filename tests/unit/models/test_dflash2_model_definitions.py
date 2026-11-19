@@ -448,10 +448,12 @@ def test_selector_loss_alpha_zero_preserves_unary_objective():
     torch.testing.assert_close(metrics["unary_loss_sum"], expected.detach())
     assert metrics["selector_loss_sum"] > 0
     # One selected draft token plus the verifier's bonus token.
-    assert metrics["argmax_eal_sum"].item() == 2.0
-    assert metrics["argmax_eal_total"].item() == 1.0
+    assert metrics["greedy_eal_sum"].item() == 2.0
+    assert metrics["greedy_eal_total"].item() == 1.0
     # The inherited unary EAL would stop at the first drafted position.
-    assert unary_metrics["argmax_eal_sum"].item() == 1.0
+    assert unary_metrics["greedy_eal_sum"].item() == 1.0
+    assert metrics["position_1_greedy_acc_sum"].item() == 1.0
+    assert unary_metrics["position_1_greedy_acc_sum"].item() == 0.0
     torch.testing.assert_close(
         metrics["accept_len_sum"], unary_metrics["accept_len_sum"]
     )
