@@ -87,7 +87,9 @@ class XPressDraftModel(DFlashDraftModel):
             "base_anchor_full_weight": kwargs.get("base_anchor_full_weight", False),
             "ce_from_data": kwargs.get("ce_from_data", False),
         }
-        return dict(shared), dict(shared)
+        val = dict(shared)
+        val["anchor_sampling"] = DFlashDraftModel.validation_anchor_sampling(**kwargs)
+        return shared, val
 
     def _draft_to_verifier_ids(self, draft_ids: torch.Tensor) -> torch.Tensor:
         """Map draft-vocab argmax ids back to verifier-vocab ids (d2t offsets)."""

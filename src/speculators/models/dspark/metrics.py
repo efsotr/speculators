@@ -64,9 +64,9 @@ def _masked_decayed_mean(
 
 
 @torch.compiler.disable
-def sample_vat_uniform(shape, device, seed=None):
+def sample_vat_uniform(shape, device, seed=42):
     generator = torch.Generator(device=device)
-    generator.manual_seed(torch.initial_seed() if seed is None else seed)
+    generator.manual_seed(seed)
     return torch.rand(shape, device=device, dtype=torch.float32, generator=generator)
 
 

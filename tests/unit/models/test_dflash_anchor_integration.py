@@ -9,6 +9,11 @@ from speculators.models.dflash.config import DFlashSpeculatorConfig
 from speculators.models.dflash.core import DFlashDraftModel
 from speculators.models.dflash2.config import DFlash2SpeculatorConfig
 from speculators.models.dflash2.core import DFlash2DraftModel
+from speculators.models.dspark.config import DSparkSpeculatorConfig
+from speculators.models.dspark.core import DSparkDraftModel
+from speculators.models.xpress.config import XPressSpeculatorConfig
+from speculators.models.xpress.core import XPressDraftModel
+from speculators.train.config.schema import DSparkArgs
 
 
 def _model(model_type="dflash", sample=False, draft_vocab_size=32):
@@ -18,10 +23,12 @@ def _model(model_type="dflash", sample=False, draft_vocab_size=32):
         num_attention_heads=2, num_key_value_heads=1, head_dim=8,
         vocab_size=32, _attn_implementation="eager",
     )
-    config_cls, model_cls = (
-        (DFlashSpeculatorConfig, DFlashDraftModel) if model_type == "dflash"
-        else (DFlash2SpeculatorConfig, DFlash2DraftModel)
-    )
+    config_cls, model_cls = {
+        "dflash": (DFlashSpeculatorConfig, DFlashDraftModel),
+        "dflash2": (DFlash2SpeculatorConfig, DFlash2DraftModel),
+        "dspark": (DSparkSpeculatorConfig, DSparkDraftModel),
+        "xpress": (XPressSpeculatorConfig, XPressDraftModel),
+    }[model_type]
     config = config_cls(
         transformer_layer_config=decoder, draft_vocab_size=draft_vocab_size, block_size=4,
         aux_hidden_state_layer_ids=[0, 1], mask_token_id=0,
@@ -112,14 +119,61 @@ def test_empty_or_padded_anchors_have_finite_zero_safe_gradients(model_type, sup
 @pytest.mark.parametrize("model_type", ["dflash", "dflash2"])
 def test_train_and_validation_policies_are_independent(model_type):
     model = _model(model_type)
-    policy = {"strategy": "entropy_curriculum", "curriculum_preset": "github"}
+    policy = {"strategy": "entropy_curriculum", "curriculum_preset": "github", "seed": 17}
     train, val = model.get_trainer_kwargs(
         loss_fn="ce", loss_implementation="eager", anchor_sampling=policy,
     )
     assert train["anchor_sampling"] == policy
-    assert val["anchor_sampling"] == {"strategy": "uniform"}
+    assert val["anchor_sampling"] == {"strategy": "uniform", "seed": 17}
     val["anchor_sampling"]["strategy"] = "changed"
     assert train["anchor_sampling"] == policy
+
+
+@pytest.mark.parametrize("model_type", ["dflash", "dflash2", "dspark", "xpress"])
+def test_validation_positions_repeat_after_training_sampling(model_type):
+    model = _model(model_type)
+    batch = _batch(64)
+    train, val = model.get_trainer_kwargs(
+        loss_fn="ce", loss_implementation="eager", max_anchors=8,
+        anchor_sampling={"seed": 17},
+    )
+
+    def validation_positions():
+        model.eval()
+        return [
+            model.prepare_training_inputs(
+                **batch, **val, anchor_sampling_step=i, anchor_sampling_rank=2,
+            )["_prepared_attention_mask"][2].clone()
+            for i in range(2)
+        ]
+
+    before = validation_positions()
+    model.train()
+    for epoch, step in [(0, 5), (3, 72)]:
+        model.prepare_training_inputs(
+            **batch, **train, anchor_sampling_epoch=epoch,
+            anchor_sampling_step=step, anchor_sampling_rank=2,
+        )
+        torch.rand(100)
+    after = validation_positions()
+    assert not torch.equal(before[0], before[1])
+    for expected, actual in zip(before, after, strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("vat_config", [{}, {"vat_seed": 19}])
+def test_vat_uses_configured_seed_and_batch_coordinates(vat_config):
+    model = _model("dspark").train()
+    batch = _batch(64)
+    train, _ = model.get_trainer_kwargs(
+        loss_fn="ce", loss_implementation="eager", max_anchors=8,
+        per_position_loss_weight="vat", seed=99, **vat_config,
+    )
+    base = DSparkArgs(**vat_config).vat_seed
+    prepared = model.prepare_training_inputs(**batch, **train, vat_batch=(2, 3, 4))
+    expected_seed = base + 1_000_003 * 3 + 97_409 * 2 + 65_537 * 4
+    expected = torch.rand((1, 32), generator=torch.Generator().manual_seed(expected_seed))
+    torch.testing.assert_close(prepared["vat_uniform"], expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("sample", [False, True])

@@ -133,7 +133,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             "strategy": "uniform"
         }
         val = dict(shared)
-        val["anchor_sampling"] = {"strategy": "uniform"}
+        val["anchor_sampling"] = DFlashDraftModel.validation_anchor_sampling(**kwargs)
         return train, val
 
     def _predecessor_ids(

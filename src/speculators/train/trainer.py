@@ -818,8 +818,6 @@ class Trainer:
             return None
         validation_started = time.perf_counter()
         self.model.eval()
-        if hasattr(self.val_loader.batch_sampler, "set_epoch"):
-            self.val_loader.batch_sampler.set_epoch(epoch)  # type: ignore[union-attr]
         val_loader = self.val_loader
         if self.rank == 0:
             val_loader = tqdm(val_loader, desc=f"Epoch {epoch}")  # type: ignore[assignment]
@@ -851,8 +849,6 @@ class Trainer:
                     call_kwargs["vat_batch"] = (epoch, i, self.rank)
                 if "anchor_sampling" in call_kwargs:
                     call_kwargs.update(
-                        anchor_sampling_epoch=epoch,
-                        anchor_sampling_num_epochs=self.config.num_epochs,
                         anchor_sampling_step=i,
                         anchor_sampling_rank=self.rank,
                     )

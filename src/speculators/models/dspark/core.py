@@ -123,22 +123,23 @@ class DSparkDraftModel(DFlashDraftModel):
         if per_position_loss_weight == "vat" and not TRAJECTORY_LOSSES.intersection(
             loss_config
         ):
-            shared["vat_seed"] = kwargs.get("seed", 42)
-        return dict(shared), dict(shared)
+            shared["vat_seed"] = kwargs.get("vat_seed", 42)
+        val = dict(shared)
+        val["anchor_sampling"] = DFlashDraftModel.validation_anchor_sampling(**kwargs)
+        return shared, val
 
     @torch.compiler.disable
     def prepare_training_inputs(
-        self, *args, vat_seed=None, vat_batch=(0, 0, 0), **kwargs
+        self, *args, vat_seed=42, vat_batch=(0, 0, 0), **kwargs
     ):
         prepared = super().prepare_training_inputs(*args, **kwargs)
         if prepared.get("per_position_loss_weight") == "vat" and not (
             TRAJECTORY_LOSSES.intersection(prepared.get("loss_config") or {})
         ):
             epoch, step, rank = vat_batch
-            base = torch.initial_seed() if vat_seed is None else vat_seed
-            # Reserve separate seed sequences for training and validation.
-            position_seed = base + 1_000_003 * step + 97_409 * epoch + 65_537 * rank
-            seed = (2 * position_seed + int(not self.training)) % (2**64)
+            position_seed = vat_seed + 1_000_003 * step + 97_409 * epoch + 65_537 * rank
+            phase_offset = 0 if self.training else 2_147_483_647
+            seed = (position_seed + phase_offset) % (2**63 - 1)
             prepared["vat_uniform"] = sample_vat_uniform(
                 (1, prepared["max_anchors"] * self.block_size),
                 prepared["hidden_states"].device,

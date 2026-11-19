@@ -78,7 +78,7 @@ def _make_val_trainer(n_batches: int, *, is_distributed: bool) -> "Trainer":
 
     batches = [_fake_batch() for _ in range(n_batches)]
     loader = MagicMock()
-    loader.__iter__ = MagicMock(return_value=iter(batches))
+    loader.__iter__ = MagicMock(side_effect=lambda: iter(batches))
     loader.__len__ = MagicMock(return_value=len(batches))
     loader.batch_sampler = MagicMock(spec=[])
 
@@ -129,3 +129,26 @@ def test_val_epoch_empty_loader_returns_empty_metrics():
     trainer = _make_val_trainer(0, is_distributed=False)
     result = trainer.val_epoch(0)
     assert result == {}
+
+
+def test_val_anchor_sampling_uses_batch_and_rank_across_training_positions():
+    trainer = _make_val_trainer(2, is_distributed=False)
+    anchor_sampling = {"strategy": "uniform", "seed": 17}
+    trainer.config = trainer.config._replace(val_call_kwargs={"anchor_sampling": anchor_sampling})
+    trainer.val_loader.batch_sampler = MagicMock()
+    for epoch, step in [(0, 11), (0, 22), (3, 104)]:
+        trainer.global_step = step
+        trainer.val_epoch(epoch)
+    trainer.val_loader.batch_sampler.set_epoch.assert_not_called()
+    calls = trainer.model.prepare_training_inputs.call_args_list
+    assert len(calls) == 6
+    for i, call in enumerate(calls):
+        anchor_kwargs = {
+            key: value for key, value in call.kwargs.items()
+            if key.startswith("anchor_sampling")
+        }
+        assert anchor_kwargs == {
+            "anchor_sampling": anchor_sampling,
+            "anchor_sampling_step": i % 2,
+            "anchor_sampling_rank": 1,
+        }

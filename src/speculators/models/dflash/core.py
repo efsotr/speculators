@@ -461,8 +461,13 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             "strategy": "uniform"
         }
         val = dict(shared)
-        val["anchor_sampling"] = {"strategy": "uniform"}
+        val["anchor_sampling"] = DFlashDraftModel.validation_anchor_sampling(**kwargs)
         return train, val
+
+    @staticmethod
+    def validation_anchor_sampling(**kwargs):
+        sampling = kwargs.get("anchor_sampling") or {}
+        return {"strategy": "uniform", "seed": sampling.get("seed", 0)}
 
     @property
     def mask_token_id(self) -> int:

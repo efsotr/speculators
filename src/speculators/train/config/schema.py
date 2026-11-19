@@ -439,7 +439,7 @@ class LossArgs(_Group):
         default=None,
         description="Loss function specification. A name "
         "(kl_div, kl_div2, rkl, jsd, ce, ce_gt, tv, "
-        "nla, lk_hybrid, REAL, raw_path) or a JSON dict for a weighted combination, "
+        "nla, lk_hybrid, REAL, raw_path, overlap_prod) or a JSON dict for a weighted combination, "
         'e.g. \'{"ce": 0.1, "tv": 0.9}\'. REAL pairs with ce_gt using weights that sum '
         'to 1. (default: "ce" for dflash, \'{"ce": 0.1, "tv": 0.9}\' for '
         'xpress, "kl_div" otherwise).',
@@ -772,7 +772,9 @@ class DFlash2Args(_Group):
 
 
 class DSparkArgs(_Group):
-    """DSpark-exclusive heads (sequential Markov head + confidence head)."""
+    """DSpark-exclusive heads and VAT sampling."""
+
+    vat_seed: int = Field(default=42, ge=0, description="DSpark: base VAT sampling seed.")
 
     markov_rank: int = Field(
         default=256,
@@ -1117,6 +1119,18 @@ class TrainConfig(BaseSettings):
     def _validate_dpace(self) -> "TrainConfig":
         """Validate the objectives and smoothing supported by each D-PACE mode."""
         losses = resolve_loss_config(self.loss.loss_fn)
+        if "overlap_prod" in losses:
+            if self.speculator_type != "dspark":
+                raise ValueError("overlap_prod requires dspark")
+            if self.dflash.per_position_loss_weight != "fixed-exp-decay":
+                raise ValueError(
+                    "overlap_prod does not support alternate per-position loss weighting"
+                )
+            if "loss_normalization" not in self.loss.model_fields_set:
+                self.loss.loss_normalization = "token_count"
+            elif self.loss.loss_normalization != "token_count":
+                raise ValueError("overlap_prod requires loss_normalization=token_count")
+            return self
         if TRAJECTORY_LOSSES.intersection(losses):
             if self.dflash.per_position_loss_weight == "vat":
                 raise ValueError("VAT requires a tokenwise loss")
