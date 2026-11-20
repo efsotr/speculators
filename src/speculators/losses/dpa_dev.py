@@ -38,15 +38,18 @@ def prepare_dpa_dev(  # noqa: C901
         "accept",
         "p_draft",
         "q_draft",
+        "q",
     }:
         raise ValueError(f"Unsupported dpa_dev_signal: {dpa_dev_signal}")
     ratio_signal = dpa_dev_signal in {"p_draft", "q_draft", "q", "p"}
-    if dpa_dev_prefix_only and not ratio_signal and not dpa_dev2:
+    if dpa_dev_prefix_only and not dpa_dev2 and dpa_dev_signal not in {
+        "p_draft", "q_draft"
+    }:
         raise ValueError("dpa_dev_prefix_only requires p_draft or q_draft")
     if ratio_signal and (
         data_token_ids is None or data_token_ids.shape != logits.shape[:-1]
     ):
-        raise ValueError("p_draft/q_draft require aligned data_token_ids")
+        raise ValueError("p_draft/q_draft/q/p require aligned data_token_ids")
     if (
         not ratio_signal
         and dpa_dev_signal != "accept"

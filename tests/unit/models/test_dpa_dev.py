@@ -417,6 +417,27 @@ def test_ratio_weights(signal, prefix_only, alpha):
     )
 
 
+def test_dpa_dev_q_weights():
+    cfg = TrainConfig.model_validate(
+        {
+            "speculator_type": "dspark",
+            "loss": {"loss_fn": "ce"},
+            "dflash": {"per_position_loss_weight": "dpa_dev", "dpa_dev_signal": "q"},
+        }
+    )
+    logits, targets, _, mask, ids = inputs()
+    _, weights, _ = prepare_dpa_dev(
+        logits, targets, mask, 4, resolve_loss_config("ce", "eager"),
+        dpa_dev_signal=cfg.dflash.dpa_dev_signal,
+        data_token_ids=ids,
+        tv_loss_fn=eager.tv_loss,
+    )
+    safe_ids = torch.where(mask.bool(), ids, 0).unsqueeze(-1)
+    q = logits.detach().softmax(-1).gather(-1, safe_ids).squeeze(-1)
+    torch.testing.assert_close(weights, reference_weights(q, mask, 0.5))
+    assert not weights.requires_grad
+
+
 @pytest.mark.parametrize("signal", ["ce", "ce_gt", "kl_div2", "accept"])
 def test_prefix_only_rejects_non_ratio(signal):
     with pytest.raises(ValueError, match="requires p_draft or q_draft"):

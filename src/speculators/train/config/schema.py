@@ -1142,12 +1142,12 @@ class TrainConfig(BaseSettings):
             if self.speculator_type not in {"dflash", "dflash2", "dspark"}:
                 raise ValueError("dpa-dev requires dflash, dflash2 or dspark")
             signal = self.dflash.dpa_dev_signal
-            if signal in {"q", "p"}:
-                raise ValueError("q/p signals require dpa-dev2")
+            if signal == "p":
+                raise ValueError("p signal requires dpa-dev2")
             losses = resolve_loss_config(self.loss.loss_fn)
             if self.dflash.dpa_dev_prefix_only and signal not in {"p_draft", "q_draft"}:
                 raise ValueError("dpa_dev_prefix_only requires p_draft or q_draft")
-            if signal not in {"accept", "p_draft", "q_draft"} and signal not in losses:
+            if signal not in {"accept", "p_draft", "q_draft", "q"} and signal not in losses:
                 raise ValueError(
                     f"dpa_dev_signal={signal} requires that loss in loss_fn"
                 )
