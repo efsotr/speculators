@@ -784,6 +784,13 @@ class DFlash2Args(_Group):
 class DSparkArgs(_Group):
     """DSpark-exclusive heads and VAT sampling."""
 
+    dvolt_top_k: int = Field(
+        default=0, ge=0, description="D-VOLT candidate count (0 disables D-VOLT)."
+    )
+    dvolt_beta: float = Field(
+        default=0.3, ge=0.0, allow_inf_nan=False,
+        description="D-VOLT coefficient for the candidate continuation reward.",
+    )
     vat_seed: int = Field(default=42, ge=0, description="DSpark: base VAT sampling seed.")
 
     markov_rank: int = Field(
@@ -1084,6 +1091,27 @@ class TrainConfig(BaseSettings):
             self.loss.loss_fn = _DEFAULT_LOSS_FN.get(self.speculator_type, "kl_div")
         if self.dflash.block_size is None:
             self.dflash.block_size = _DEFAULT_BLOCK_SIZE.get(self.speculator_type, 8)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dvolt(self) -> "TrainConfig":
+        if self.dspark.dvolt_top_k and (
+            self.speculator_type != "dspark"
+            or self.data.hidden_states_backend not in {"online", "online_gpu"}
+            or not self.dflash.sample_from_anchor
+            or self.dspark.markov_rank <= 0
+            or self.dspark.markov_head_type != "vanilla"
+            or self.dflash.per_position_loss_weight != "fixed-exp-decay"
+            or not 0 < self.dflash.dflash_decay_gamma < float("inf")
+            or self.loss.loss_normalization != "weight_sum"
+            or self.draft.draft_vocab_size is not None
+            or self.trainer.ddp_python_reducer
+        ):
+            raise ValueError(
+                "D-VOLT requires DSpark with online or online_gpu, sample_from_anchor, "
+                "a vanilla Markov head, full vocabulary, fixed-exp-decay with "
+                "finite positive gamma, weight_sum and the native DDP reducer."
+            )
         return self
 
     @model_validator(mode="after")

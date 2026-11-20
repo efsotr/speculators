@@ -14,6 +14,7 @@ from speculators.losses.real import TRAJECTORY_LOSSES
 from speculators.model import SpeculatorModel
 from speculators.models.dflash.core import DFlashDraftModel
 from speculators.models.dspark.config import DSparkSpeculatorConfig
+from speculators.models.dspark.dvolt import build_candidate_graph, candidate_probs
 from speculators.models.dspark.metrics import compute_metrics, sample_vat_uniform
 from speculators.models.dspark.model_definitions import ConfidenceHead, MarkovHead
 from speculators.models.utils import conditional_torch_compile
@@ -98,7 +99,10 @@ class DSparkDraftModel(DFlashDraftModel):
     def get_trainer_kwargs(**kwargs) -> tuple[dict, dict]:
         """Resolve DSpark's compound loss from ``--loss-fn``."""
         implementation = kwargs.get("loss_implementation", "fused")
-        loss_config = resolve_loss_config(kwargs["loss_fn"], implementation)
+        dvolt_top_k = kwargs.get("dvolt_top_k", 0)
+        loss_config = resolve_loss_config(
+            "tv" if dvolt_top_k else kwargs["loss_fn"], implementation
+        )
         tv_loss_fn = resolve_loss_config("tv", implementation)["tv"][0]
         gamma = kwargs.get("dflash_decay_gamma", 4.0)
         max_anchors = kwargs.get("max_anchors", 3072)
@@ -126,6 +130,10 @@ class DSparkDraftModel(DFlashDraftModel):
             loss_config
         ):
             shared["vat_seed"] = kwargs.get("vat_seed", 42)
+        if dvolt_top_k:
+            shared.update(
+                dvolt_top_k=dvolt_top_k, dvolt_beta=kwargs.get("dvolt_beta", 0.3)
+            )
         val = dict(shared)
         val["anchor_sampling"] = DFlashDraftModel.validation_anchor_sampling(**kwargs)
         return shared, val
@@ -150,7 +158,7 @@ class DSparkDraftModel(DFlashDraftModel):
         return prepared
 
     @conditional_torch_compile
-    def forward(
+    def forward(  # noqa: C901, PLR0917
         self,
         hidden_states: torch.Tensor,  # [1, total_seq_len, num_hidden*hidden_size]
         input_ids: torch.Tensor,  # [1, total_seq_len]
@@ -172,6 +180,9 @@ class DSparkDraftModel(DFlashDraftModel):
         dpace_alpha: float = 0.5,
         vat_uniform: torch.Tensor | None = None,
         ste_r: bool = False,
+        dvolt_top_k: int = 0,
+        dvolt_beta: float = 0.3,
+        dvolt_score_branches: Callable | None = None,
         **kwargs,
     ):
         hidden, logits, targets, aligned_loss_mask, anchored_block_indices = (
@@ -183,6 +194,7 @@ class DSparkDraftModel(DFlashDraftModel):
                 document_ids,
                 position_ids,
                 max_anchors=max_anchors,
+                _anchor_scan=bool(dvolt_top_k),
                 **kwargs,
             )
         )
@@ -206,6 +218,52 @@ class DSparkDraftModel(DFlashDraftModel):
                 [block_tokens[:, :1], block_tokens[:, :-1]], dim=1
             )  # [num_blocks, block]
         hidden_blocks = hidden.view(num_blocks, block, -1)
+
+        if dvolt_top_k:
+            if (
+                self.use_draft_vocab
+                or not self.config.sample_from_anchor
+                or self.markov_head is None
+                or self.markov_head.head_type != "vanilla"
+                or dvolt_top_k > logits.shape[-1]
+                or dvolt_score_branches is None
+            ):
+                raise ValueError(
+                    "D-VOLT requires a full vocabulary, a vanilla Markov head, "
+                    "sample_from_anchor and online branch scoring"
+                )
+            anchors = anchored_block_indices.reshape(num_blocks, block)[:, 0]
+            valid = aligned_loss_mask.reshape(num_blocks, block).bool().any(dim=-1)
+
+            def score_branches(active, candidates, choices):
+                return dvolt_score_branches(
+                    input_ids, document_ids, position_ids,
+                    anchors=anchors[active], candidates=candidates, choices=choices,
+                )
+
+            def project_target(features):
+                return self.verifier_lm_head(self.verifier_norm(features))
+
+            prev_token_ids, targets, candidates, values = build_candidate_graph(
+                logits.reshape(num_blocks, block, -1),
+                block_tokens[:, 0], self.markov_head,
+                top_k=dvolt_top_k, beta=dvolt_beta, score_branches=score_branches,
+                project_target=project_target,
+                anchor_hidden=verifier_last_hidden_states[0, anchors], valid=valid,
+            )
+            loss_config = {"tv": (tv_loss_fn, 2.0)}
+            if dvolt_beta:
+                ids = candidates.reshape(1, mask_tokens_size, dvolt_top_k)
+
+                def continuation_reward(draft, target):
+                    overlap = torch.minimum(
+                        candidate_probs(draft, ids), candidate_probs(target, ids)
+                    )
+                    return (overlap * values.reshape_as(ids)).sum(-1)
+
+                loss_config["dvolt_continuation"] = (
+                    continuation_reward, -2 * dvolt_beta
+                )
 
         confidence_logits = None
         prev_emb = None
@@ -265,15 +323,15 @@ class DSparkDraftModel(DFlashDraftModel):
                     anchored_block_indices,
                     require_full_vocab=uses_dataset_loss,
                 )
-                if (
+                if not dvolt_top_k and (
                     uses_dataset_loss
+                    or not self.use_draft_vocab
                     or (
                         per_position_loss_weight
                         in {"dpa_dev", "dpa-dev", "dpa_dev2", "dpa-dev2"}
                         and dpa_dev_signal in {"p_draft", "q_draft", "q", "p"}
                     )
                 )
-                or not self.use_draft_vocab
                 else None
             ),
             compute_prob_metrics=not self.use_draft_vocab,

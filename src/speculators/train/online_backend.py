@@ -160,6 +160,12 @@ class OnlineTransfer(HiddenStatesTransfer):
             for features, tokens in zip(hidden.split(lengths), rows, strict=True)
         ]
 
+    def score_dvolt_branches(self, *args, **kwargs):
+        from speculators.models.dspark.dvolt import score_qwen3_branches
+
+        self.setup()
+        return score_qwen3_branches(self.model, *args, **kwargs)
+
     def get_cached(self, file_idx):
         # Keep the single-row lookup contract for direct Dataset indexing/tools.
         return self.get_packed([file_idx])[0]

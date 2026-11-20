@@ -744,6 +744,9 @@ def main(cfg: TrainConfig):  # noqa: C901
 
     # Get trainer kwargs from model class
     train_call_kwargs, val_call_kwargs = model_class.get_trainer_kwargs(**vars(args))
+    if args.speculator_type == "dspark" and args.dvolt_top_k:
+        train_call_kwargs["dvolt_score_branches"] = transfer.score_dvolt_branches
+        val_call_kwargs["dvolt_score_branches"] = transfer.score_dvolt_branches
 
     trainer_config = TrainerConfig(
         num_epochs=args.epochs,
