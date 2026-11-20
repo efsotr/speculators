@@ -444,6 +444,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             "loss_config": loss_config,
             "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
             "real_beta": kwargs.get("real_beta", 0.0),
+            "ste_r": kwargs.get("ste_r", False),
             "gamma": gamma,
             "max_anchors": max_anchors,
             "per_position_loss_weight": per_position_loss_weight,
@@ -795,6 +796,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
         dpace_token_source: str = "teacher_argmax",  # noqa: S107
+        ste_r: bool = False,
         **kwargs,
     ):
         _, logits, targets, aligned_loss_mask, block_indices = self._backbone_forward(
@@ -816,6 +818,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             self.block_size,
             gamma=gamma,
             real_beta=real_beta,
+            ste_r=ste_r,
             loss_config=loss_config,
             loss_normalization=loss_normalization,
             per_position_loss_weight=per_position_loss_weight,

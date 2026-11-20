@@ -37,6 +37,7 @@ def test_real_schema(kind):
         }
     )
     assert cfg.loss.real_beta == 0.0
+    assert cfg.loss.ste_r is False
     assert cfg.loss.loss_normalization == "token_count"
     assert resolve_loss_config(cfg.loss.loss_fn)["ce_gt"][1] == 0.3
     assert resolve_loss_config("REAL")["ce_gt"][1] == 0.1
@@ -62,7 +63,7 @@ def test_real_schema_rejects_unaligned_model():
         )
 
 
-def reference_loss(logits, targets, ids, mask, start, gamma, beta=0.0):
+def reference_loss(logits, targets, ids, mask, start, gamma, beta=0.0, ste_r=False):
     draft, teacher = logits[0].softmax(-1), targets[0].detach().softmax(-1)
     rewards = []
     ce_losses = []
@@ -73,7 +74,12 @@ def reference_loss(logits, targets, ids, mask, start, gamma, beta=0.0):
                 break
             token = ids[0, slot]
             overlap = torch.minimum(draft[slot], teacher[slot]).sum()
-            ratio = (draft[slot, token] / teacher[slot, token]).clamp(max=1.0)
+            ratio = draft[slot, token] / teacher[slot, token]
+            acceptance = ratio.clamp(max=1.0)
+            if ste_r:
+                surrogate = ratio / ratio.detach().clamp_min(1.0)
+                acceptance = acceptance.detach() + (surrogate - surrogate.detach())
+            ratio = acceptance
             rewards.append(survival * ((1 + beta) * overlap - beta * ratio))
             survival = survival * ratio
             ce_losses.append(
@@ -88,6 +94,7 @@ def reference_loss(logits, targets, ids, mask, start, gamma, beta=0.0):
     return (1 - torch.stack(rewards)).mean(), torch.stack(ce_losses).mean()
 
 
+@pytest.mark.parametrize("ste_r", [False, True])
 @pytest.mark.parametrize("beta", [0.0, 2.0])
 @pytest.mark.parametrize(
     ("implementation", "start", "ce_weight", "compiled", "empty"),
@@ -101,7 +108,7 @@ def reference_loss(logits, targets, ids, mask, start, gamma, beta=0.0):
     ],
 )
 def test_real_value_gradient_and_compile(
-    implementation, start, ce_weight, compiled, empty, beta
+    implementation, start, ce_weight, compiled, empty, beta, ste_r
 ):
     if implementation == "fused" and not torch.cuda.is_available():
         pytest.skip("fused TV requires CUDA")
@@ -139,6 +146,7 @@ def test_real_value_gradient_and_compile(
             tv_loss_fn=tv_fn,
             gamma=gamma,
             real_beta=beta,
+            ste_r=ste_r,
         )
 
     actual, terms = (torch.compile(run, fullgraph=True) if compiled else run)(
@@ -147,7 +155,9 @@ def test_real_value_gradient_and_compile(
         ids,
         mask,
     )
-    branch, ce = reference_loss(logits, targets, ids, mask, start, gamma, beta)
+    branch, ce = reference_loss(
+        logits, targets, ids, mask, start, gamma, beta, ste_r
+    )
     expected = (1 - ce_weight) * branch + ce_weight * ce
     torch.testing.assert_close(terms["real_branch_loss"], branch)
     torch.testing.assert_close(terms["ce_gt_loss"], ce)
@@ -170,6 +180,7 @@ def test_real_value_gradient_and_compile(
         sample_from_anchor=start == 0,
         gamma=gamma,
         real_beta=beta,
+        ste_r=ste_r,
     )
     torch.testing.assert_close(metric_loss, expected)
 

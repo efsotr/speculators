@@ -419,6 +419,10 @@ class GenerationArgs(_Group):
 
 
 class LossArgs(_Group):
+    ste_r: bool = Field(
+        default=False,
+        description="Use a straight-through gradient for REAL log acceptance.",
+    )
     real_beta: float = Field(
         default=0.0,
         allow_inf_nan=False,
@@ -1127,6 +1131,8 @@ class TrainConfig(BaseSettings):
         losses = resolve_loss_config(self.loss.loss_fn)
         if self.loss.real_beta != 0.0 and "REAL" not in losses:
             raise ValueError("real_beta requires REAL in loss_fn")
+        if self.loss.ste_r and "REAL" not in losses:
+            raise ValueError("ste_r requires REAL in loss_fn")
         if "overlap_prod" in losses:
             if self.speculator_type != "dspark":
                 raise ValueError("overlap_prod requires dspark")

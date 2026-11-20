@@ -202,6 +202,11 @@ Set `loss.real_beta` to replace the current slot's overlap `a_i` with
 acceptance ratio. The exclusive prefix still uses the earlier acceptance
 ratios. The default is `0.0`. This coefficient applies to the objective;
 `prob_eal` continues to use the overlap.
+Set `loss.ste_r: true` to pass gradients through the log acceptance clamp
+at valid REAL slots, including where the draft token probability exceeds
+the teacher token probability. The forward acceptance ratio is unchanged.
+This applies to the exclusive prefix and the acceptance term in the beta
+correction. The default is `false`.
 The first masked slot or document boundary ends a trajectory. The REAL
 component averages one minus the contribution at each valid prediction
 slot. The CE component weights those same slots by `exp(-i / gamma)`,

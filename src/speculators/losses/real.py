@@ -5,6 +5,16 @@ import torch
 TRAJECTORY_LOSSES = {"REAL", "raw_path"}
 
 
+class _ClampLogRatioSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, log_ratio: torch.Tensor) -> torch.Tensor:
+        return log_ratio.clamp(max=0.0)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        return grad_output
+
+
 @torch.compile(dynamic=True)
 def observed_log_probability(logits, ids):
     return logits.gather(-1, ids.unsqueeze(-1)).squeeze(-1).float() - (
@@ -45,6 +55,7 @@ def trajectory_loss(
     raw_path,
     ce_weight,
     beta=0.0,
+    ste_r: bool = False,
     ce_name="ce_gt",
     ce_position_weights=None,
     tv_cache=None,
@@ -67,7 +78,11 @@ def trajectory_loss(
         block_size=block_size,
         start_pos=start_pos,
     )
-    log_b = torch.where(valid, log_ratio.clamp(max=0.0), 0.0)
+    if ste_r and not raw_path:
+        log_b = _ClampLogRatioSTE.apply(log_ratio)
+    else:
+        log_b = log_ratio.clamp(max=0.0)
+    log_b = torch.where(valid, log_b, 0.0)
     inclusive = log_b.cumsum(-1)
     if raw_path:
         denominator = valid.any(-1).sum().clamp_min(1) * window

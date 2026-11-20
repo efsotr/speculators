@@ -116,6 +116,7 @@ def compute_metrics(  # noqa: C901
     shared_weights: dict | None = None,
     compute_prob_metrics: bool = False,
     vat_uniform: torch.Tensor | None = None,
+    ste_r: bool = False,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the DSpark loss and a metrics dict (``*_sum``/``*_total`` pairs)."""
 
@@ -205,6 +206,7 @@ def compute_metrics(  # noqa: C901
         tv_loss_fn=tv_loss_fn,
         gamma=gamma,
         real_beta=real_beta,
+        ste_r=ste_r,
         data_token_ids=data_token_ids,
         tv_cache=tv_cache,
     )

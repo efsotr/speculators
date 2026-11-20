@@ -173,6 +173,7 @@ def compute_metrics(
     data_token_ids: torch.Tensor | None = None,
     dpa_dev_weights: dict | None = None,
     compute_prob_metrics: bool = False,
+    ste_r: bool = False,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Combine the unary DFlash objective with a K-way selector objective."""
     if "REAL" in loss_config:
@@ -188,6 +189,7 @@ def compute_metrics(
         tv_loss_fn=tv_loss_fn,
         gamma=gamma,
         real_beta=real_beta,
+        ste_r=ste_r,
         confidence_head_alpha=0.0,
         dpa_dev_signal=dpa_dev_signal,
         dpa_dev_alpha=dpa_dev_alpha,

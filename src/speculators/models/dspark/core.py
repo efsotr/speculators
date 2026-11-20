@@ -111,6 +111,7 @@ class DSparkDraftModel(DFlashDraftModel):
             "loss_config": loss_config,
             "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
             "real_beta": kwargs.get("real_beta", 0.0),
+            "ste_r": kwargs.get("ste_r", False),
             "tv_loss_fn": tv_loss_fn,
             "gamma": gamma,
             "max_anchors": max_anchors,
@@ -170,6 +171,7 @@ class DSparkDraftModel(DFlashDraftModel):
         dpa_dev_prefix_only: bool = False,
         dpace_alpha: float = 0.5,
         vat_uniform: torch.Tensor | None = None,
+        ste_r: bool = False,
         **kwargs,
     ):
         hidden, logits, targets, aligned_loss_mask, anchored_block_indices = (
@@ -248,6 +250,7 @@ class DSparkDraftModel(DFlashDraftModel):
             tv_loss_fn=tv_loss_fn,
             gamma=gamma,
             real_beta=real_beta,
+            ste_r=ste_r,
             confidence_head_alpha=confidence_head_alpha,
             loss_normalization=loss_normalization,
             per_position_loss_weight=per_position_loss_weight,

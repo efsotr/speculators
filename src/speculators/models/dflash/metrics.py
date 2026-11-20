@@ -46,6 +46,7 @@ def compute_metrics(  # noqa: C901
     data_token_ids: torch.Tensor | None = None,
     tv_loss_fn=tv_loss,
     compute_prob_metrics: bool = False,
+    ste_r: bool = False,
 ) -> tuple[torch.Tensor, dict]:
     """Compute loss and accuracy metrics for draft model predictions.
 
@@ -144,6 +145,7 @@ def compute_metrics(  # noqa: C901
         tv_loss_fn=tv_loss_fn,
         gamma=gamma,
         real_beta=real_beta,
+        ste_r=ste_r,
         data_token_ids=data_token_ids,
         tv_cache=tv_cache,
     )

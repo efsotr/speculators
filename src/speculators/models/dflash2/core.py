@@ -114,6 +114,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             "loss_config": loss_config,
             "loss_normalization": kwargs.get("loss_normalization", "weight_sum"),
             "real_beta": kwargs.get("real_beta", 0.0),
+            "ste_r": kwargs.get("ste_r", False),
             "tv_loss_fn": tv_loss_fn,
             "gamma": kwargs.get("dflash_decay_gamma", 4.0),
             "max_anchors": kwargs.get("max_anchors", 512),
@@ -174,6 +175,7 @@ class DFlash2DraftModel(DFlashDraftModel):
         dpace_alpha: float = 0.5,
         dpace_dev_accept_prob: str = "q",
         dpace_token_source: str = "teacher_argmax",  # noqa: S107
+        ste_r: bool = False,
         **kwargs,
     ) -> tuple[None, torch.Tensor, dict[str, Any]]:
         hidden, unary_logits, targets, aligned_loss_mask, block_indices = (
@@ -229,6 +231,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             tv_loss_fn=tv_loss_fn,
             gamma=gamma,
             real_beta=real_beta,
+            ste_r=ste_r,
             selector_loss_alpha=selector_loss_alpha,
             dpa_dev_weights=dpa_dev_weights,
             loss_normalization=loss_normalization,
